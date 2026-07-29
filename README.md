@@ -1,6 +1,6 @@
 # suibench
 
-An execution-graded benchmark for finding and weaponizing real vulnerabilities in Sui move packages. The model is deployed into a docker container with the vulnerable package deployed on a localnet where it hypothesizes and executes transactions. suibench grades each finding by running the model's exploit on a fresh devnet localnet, then reading the resulting on-chain state. A finding is credited to a vulnerability through counterfactual attribution.
+An execution-graded benchmark for finding and weaponizing real vulnerabilities in Sui move packages. The model is deployed into a docker container with the vulnerable package deployed on a localnet where it hypothesizes and executes transactions. suibench grades each finding by running the model's exploit on a localnet, then reading the resulting on-chain state. A finding is credited to a vulnerability through counterfactual attribution.
 
 See [`DESIGN.md`](./DESIGN.md) for the full integrity architecture.
 
@@ -9,7 +9,7 @@ See [`DESIGN.md`](./DESIGN.md) for the full integrity architecture.
 This is a pnpm workspace with two packages:
 
 - **`core/`** — the pure kernel: scoring, counterfactual attribution, the agent runtime, and the port interfaces (`Grader`, `Sandbox`, `Store`, `Judge`). No I/O, no Docker.
-- **`suibench/`** — the benchmark: effectful adapters (the devnet confirmer, sandbox, model clients), the CLI, and the labeled `dataset/`.
+- **`suibench/`** — the benchmark: effectful adapters (the localnet confirmer, sandbox, model clients), the CLI, and the labeled `dataset/`.
 
 ## Dataset
 
@@ -23,7 +23,7 @@ Each entry contains `sources/` (the vulnerable Move package), `entry.json` (labe
 ## Requirements
 
 - Node ≥ 20, `pnpm`
-- Docker (the confirmer boots a Sui devnet localnet per entry)
+- Docker (the confirmer boots a Sui localnet per entry)
 - An `ANTHROPIC_API_KEY` (or `OPENAI_API_KEY` / `GEMINI_API_KEY`) for live model runs
 
 ## Quickstart
