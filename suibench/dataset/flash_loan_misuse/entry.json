@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "vulns": [
+    {
+      "id": "repay-any-coin",
+      "module": "lending_pool",
+      "title": "Flash-loan repay accepts any coin, not the loaned funds",
+      "severity": "critical",
+      "root_cause": "`repay` only checks that the repayment coin's value is >= the receipt's `borrow_amount` and then hands the repayment coin straight back to the caller — it never captures the loaned funds back into the pool. So an attacker `borrow`s the pool's whole balance, presents any coin of sufficient value to clear the check (which is returned to them intact), and keeps the borrowed coin, walking away with the pool's seeded liquidity while the pool is left drained. A correct `repay` must join the repayment into the pool and require the pool be restored to at least its pre-borrow balance, so the borrowed funds cannot be kept.",
+      "exploit": true,
+      "patch": true
+    }
+  ]
+}

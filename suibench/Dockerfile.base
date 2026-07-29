@@ -1,0 +1,102 @@
+# suibench-base: Heavy toolchain image (Sui CLI + sui-prover + Boogie + Z3 + Node)
+# Rebuild only when bumping tool versions:
+#   docker build -f Dockerfile.base -t suibench-base .
+
+# ── Stage 1: Build sui-prover + Boogie from source ──────────────
+FROM ubuntu:24.04 AS prover-builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+  curl git build-essential pkg-config libssl-dev \
+  dotnet-sdk-8.0 \
+  && rm -rf /var/lib/apt/lists/*
+
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Build sui-prover
+RUN git clone --depth 1 https://github.com/asymptotic-code/sui-prover.git /tmp/sui-prover \
+  && cd /tmp/sui-prover \
+  && cargo install --locked --path ./crates/sui-prover --root /opt/prover
+
+# Build Boogie
+RUN git clone --depth 1 https://github.com/boogie-org/boogie.git /tmp/boogie \
+  && cd /tmp/boogie \
+  && dotnet build Source/Boogie.sln -c Release \
+  && mkdir -p /opt/prover/boogie \
+  && cp -r Source/BoogieDriver/bin/Release/net8.0/* /opt/prover/boogie/
+
+# ── Stage 2: Runtime base image ─────���───────────────────────────
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies + Z3 + .NET runtime (for Boogie)
+RUN apt-get update && apt-get install -y \
+  curl \
+  git \
+  jq \
+  build-essential \
+  pkg-config \
+  libssl-dev \
+  z3 \
+  dotnet-runtime-8.0 \
+  && rm -rf /var/lib/apt/lists/*
+
+# Copy prover binaries from build stage
+COPY --from=prover-builder /opt/prover/bin/sui-prover /usr/local/bin/sui-prover
+COPY --from=prover-builder /opt/prover/boogie/ /opt/prover/boogie/
+RUN ln -s /opt/prover/boogie/BoogieDriver /usr/local/bin/boogie
+
+# Set prover environment variables
+ENV BOOGIE_EXE=/usr/local/bin/boogie
+ENV Z3_EXE=/usr/bin/z3
+
+# Install Sui CLI — PINNED (arch-aware). Previously this queried GitHub for the
+# LATEST devnet release, which is non-reproducible: a base rebuild silently
+# floated the CLI (e.g. 1.69 -> 1.75), changing framework revisions and tooling
+# behavior. Bump this tag deliberately when upgrading; keep the baked framework
+# below in sync (it resolves against whatever CLI version is installed here).
+ENV SUI_VERSION=devnet-v1.75.0
+RUN set -eux; \
+  ARCH=$(uname -m); \
+  case "$ARCH" in \
+    x86_64)  SUI_ARCH="ubuntu-x86_64" ;; \
+    aarch64) SUI_ARCH="ubuntu-aarch64" ;; \
+    *) echo "Unsupported arch: $ARCH" && exit 1 ;; \
+  esac; \
+  echo "Installing Sui $SUI_VERSION for $SUI_ARCH"; \
+  curl -fsSL "https://github.com/MystenLabs/sui/releases/download/${SUI_VERSION}/sui-${SUI_VERSION}-${SUI_ARCH}.tgz" \
+    -o /tmp/sui.tgz; \
+  tar -xzf /tmp/sui.tgz -C /usr/local/bin; \
+  rm /tmp/sui.tgz; \
+  sui --version
+
+# Pre-fetch the Sui framework git dependency into /root/.move so devnet boots
+# reuse the cached framework instead of git-cloning MystenLabs/sui from GitHub on
+# EVERY boot. That clone was the dominant per-boot network dependency (it blocks
+# publish); baking it makes boots fast (~15s), reproducible, and network-
+# independent, and pins the framework to the CLI version above. `--build-env
+# testnet` matches how entrypoint.sh publishes the target.
+RUN set -eux; \
+  mkdir -p /tmp/fwcache/sources; \
+  printf '[package]\nname = "fwcache"\nedition = "2024"\n\n[dependencies]\n' > /tmp/fwcache/Move.toml; \
+  printf 'module fwcache::fwcache { public fun f() {} }\n' > /tmp/fwcache/sources/fwcache.move; \
+  sui move build --path /tmp/fwcache --build-env testnet; \
+  ls /root/.move/git/; \
+  rm -rf /tmp/fwcache
+
+# Install Node.js 22
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+  && apt-get install -y nodejs \
+  && rm -rf /var/lib/apt/lists/*
+
+# Install pnpm — PINNED. `pnpm@latest` is non-reproducible: when pnpm 11 shipped,
+# a base rebuild silently jumped 10.x -> 11.x, and pnpm 11 makes un-approved
+# dependency build scripts a FATAL error, breaking `pnpm install --frozen-lockfile`.
+# Keep this in sync with package.json's "packageManager" field.
+RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
+
+WORKDIR /workspace

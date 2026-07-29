@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "vulns": [
+    {
+      "id": "settle-strands-refunds",
+      "module": "auction",
+      "title": "Auction settle sweeps the whole balance to the seller, stranding outbid bidders' refunds",
+      "severity": "high",
+      "root_cause": "settle transfers the ENTIRE `auction.balance` to the seller instead of only the winning bid (`highest_bid`). But `auction.balance` also holds outbid bidders' refundable deposits: when a higher bid arrives, `bid` hands the previous highest bidder a BidReceipt refundable for their amount and leaves that amount in the balance. Because settle sweeps everything to the seller, an outbid bidder's later `claim_refund` aborts against an empty balance — their deposit is stolen. Concretely, a colluding seller shill-bids one unit over a victim to outbid them, then settles: the seller receives the victim's deposit on top of their own returned shill bid, netting exactly the victim's stranded deposit. The fix pays the seller only `highest_bid` and leaves outbid deposits in the balance so `claim_refund` can still honor them (settle and refunds no longer draw against the same funds).",
+      "exploit": true,
+      "patch": true
+    }
+  ]
+}

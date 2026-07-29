@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "vulns": [
+    {
+      "id": "checked-shlw-overflow",
+      "module": "math_u256",
+      "title": "checked_shlw overflow guard lets attacker mint liquidity for ~1 token",
+      "severity": "critical",
+      "root_cause": "checked_shlw guards a 64-bit left shift with mask 0xffffffffffffffff << 192 and a strict > comparison; the mask should be 1 << 192 with >=. Values in the unguarded gap let n << 64 silently overflow (returning a wrapped value with overflow=false), so a pool that trusts the result credits enormous liquidity for ~1 token unit and lets the attacker drain reserves.",
+      "exploit": true,
+      "patch": true
+    }
+  ]
+}

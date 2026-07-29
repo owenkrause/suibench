@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "vulns": [
+    {
+      "id": "unprotected-mint",
+      "module": "token",
+      "title": "Unprotected mint on shared TreasuryCap",
+      "severity": "critical",
+      "root_cause": "TreasuryCap is wrapped in a shared TreasuryCapHolder with no access-control gate on mint, so any account can call mint to issue arbitrary tokens to any recipient.",
+      "exploit": true,
+      "patch": true
+    }
+  ]
+}

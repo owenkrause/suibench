@@ -1,0 +1,35 @@
+{
+  "name": "suibench",
+  "version": "1.0.0",
+  "type": "module",
+  "bin": {
+    "suibench": "dist/bench/cli.js"
+  },
+  "files": [
+    "dist",
+    "dataset",
+    "!dist/**/*.test.js",
+    "!dist/**/*.test.d.ts"
+  ],
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "pnpm clean && tsc && tsc -p tsconfig.scripts.json",
+    "pretest": "pnpm --filter core build && pnpm build",
+    "test": "vitest run --passWithNoTests",
+    "prepack": "pnpm --filter core build && pnpm build",
+    "verify:graders": "tsx scripts/verify-graders.ts",
+    "verify:twins": "tsx scripts/verify-twins.ts"
+  },
+  "dependencies": {
+    "@mysten/sui": "^2.15.0",
+    "core": "workspace:*",
+    "tsx": "^4.21.0"
+  },
+  "devDependencies": {
+    "@mysten/prettier-plugin-move": "^0.4.0",
+    "@types/node": "^25.5.2",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.3",
+    "web-tree-sitter": "0.20.8"
+  }
+}

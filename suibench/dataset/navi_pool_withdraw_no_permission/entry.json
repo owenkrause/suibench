@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "vulns": [
+    {
+      "id": "withdraw-no-permission",
+      "module": "pool",
+      "title": "withdraw has no permission check, letting any caller drain the pool",
+      "severity": "critical",
+      "root_cause": "pool::withdraw calls `coin::take(&mut pool.funds, amount, ctx)` and returns the coin without any permission check — it never verifies that the transaction sender is the pool's `operator` (or any other authorized party). Because Pool is a shared object, any account can call `withdraw` and remove an arbitrary `amount` of TOKEN from the pool's funds and send it wherever they like, even though they deposited nothing and have no claim to the funds. This directly drains the pool's assets. The fix is to gate `withdraw` on the caller's identity, e.g. `assert!(tx_context::sender(ctx) == pool.operator, ENotAuthorized)` as the first statement (equivalently, restricting the function to an authorized/friend path), so only the operator can withdraw.",
+      "exploit": true,
+      "patch": true
+    }
+  ]
+}

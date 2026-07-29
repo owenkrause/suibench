@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "vulns": [
+    {
+      "id": "receipt-wrong-order",
+      "module": "limit_order",
+      "title": "repay_flash_loan discards the receipt's order_id, so a flash loan borrowed from one order can be repaid into another",
+      "severity": "critical",
+      "root_cause": "flash_loan records which order the funds came from by stamping `order_id: object::id(order)` into the `FlashLoanReceipt` hot potato (a no-ability struct that must be consumed by repay_flash_loan in the same transaction). But repay_flash_loan destructures the receipt as `FlashLoanReceipt { order_id: _, repay_amount }` — it discards `order_id` and never asserts it equals `object::id(order)` for the order the repayment is being joined into. It only checks the coin amount. So the receipt enforces THAT a repayment happens and its size, but not WHERE: an attacker flash-borrows from a victim's LimitOrder (draining its funds and receiving a receipt stamped with the victim's id), then calls repay_flash_loan passing their OWN LimitOrder — the amount check passes and the borrowed coin is deposited into the attacker's order instead of the victim's. The victim's order is left permanently short by the borrowed amount while the attacker's order is credited it. The fix is to bind the receipt to its source: assert `receipt.order_id == object::id(order)` in repay_flash_loan.",
+      "exploit": true,
+      "patch": true
+    }
+  ]
+}

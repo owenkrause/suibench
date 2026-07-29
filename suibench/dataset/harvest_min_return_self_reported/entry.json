@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "vulns": [
+    {
+      "id": "self-reported-return",
+      "module": "strategy_vault",
+      "title": "finish_harvest checks a caller-supplied returned_amount instead of the vault's real balance, so the operator drains depositors past the min-return floor",
+      "severity": "critical",
+      "root_cause": "The shared Vault holds pooled depositor funds (`funds: Balance<SUI>`), and the strategy operator is bounded by a min-return floor that protects those depositors: after a harvest, at least 98% of the reserves snapshotted at start_harvest must remain. finish_harvest enforces this with `assert!(returned_amount >= saved_reserves * 98%)`, but `returned_amount` is a plain `u64` PARAMETER supplied by the operator — it is never derived from an actual repaid coin nor from the vault's real `balance::value(&funds)`. So a malicious or compromised operator calls start_harvest (snapshot = balance), withdraw_for_strategy to pull the ENTIRE `Coin<SUI>` balance out to themselves, then finish_harvest passing `returned_amount = saved_reserves` (a value it merely asserts, moving nothing): the fabricated number satisfies the floor and the operation finalizes with the vault emptied and the operator holding all the depositors' SUI. The floor that is supposed to cap the operator at a 2% draw protects nothing. (The snapshot is also resettable: start_harvest overwrites `saved_reserves` and never rejects a nested call, so re-entering after a withdrawal lowers the required floor.) The victim is the depositors; the fix is to compute the retained amount from the vault's real balance, not a caller argument, and to reject nested start_harvest.",
+      "exploit": true,
+      "patch": true
+    }
+  ]
+}

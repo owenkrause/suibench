@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "vulns": [
+    {
+      "id": "flawed-overflow-guard",
+      "module": "pool",
+      "title": "Flawed overflow guard in math_utils allows near-free liquidity",
+      "severity": "critical",
+      "root_cause": "checked_shl_64 uses `n > overflow_mask` instead of checking whether any bit above position 191 is set; an attacker crafts sqrt-price bounds that trigger the precision fallback path, causing compute_deposit_a to return a near-zero required_a deposit, so add_liquidity mints a large liquidity position for almost no token A.",
+      "exploit": true,
+      "patch": true
+    }
+  ]
+}

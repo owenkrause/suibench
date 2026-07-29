@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "vulns": [
+    {
+      "id": "refund-over-credit",
+      "module": "vault",
+      "title": "claim_refund multiplies by DecimalPrecision without dividing, over-refunding the depositor",
+      "severity": "critical",
+      "root_cause": "vault::claim_refund computes the refund as `amount_to_refund = ticket.amount * DECIMAL_PRECISION` (DECIMAL_PRECISION = 1000) and then pays out that value via `coin::take(&mut vault.investment_balance, amount_to_refund, ctx)`. The intended fixed-point formula multiplies the stored amount by DECIMAL_PRECISION and then divides by DECIMAL_PRECISION to recover the original amount, but the divide is omitted — so the function refunds exactly DECIMAL_PRECISION (1000x) more than the depositor invested. Because RefundTicket.amount records the deposited value and the refund is drawn from the shared vault's investment_balance, an attacker can invest a small stake, immediately claim_refund, and withdraw 1000x their deposit, draining the vault's entire investment liquidity. The fix restores the divide: `amount_to_refund = ticket.amount * DECIMAL_PRECISION / DECIMAL_PRECISION`, so the refund equals exactly ticket.amount.",
+      "exploit": true,
+      "patch": true
+    }
+  ]
+}

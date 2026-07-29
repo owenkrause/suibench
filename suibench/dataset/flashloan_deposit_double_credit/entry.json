@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "vulns": [
+    {
+      "id": "deposit-double-credit",
+      "module": "flash",
+      "title": "Flash-loan pool drain via deposit double-credit",
+      "severity": "critical",
+      "root_cause": "deposit both credits the caller's withdrawable lender ledger (*balance = *balance + coin::value(&coin), or a fresh vec_map entry) AND returns the same coin to the pool via coin::put(&mut self.to_lend, coin). The flash-loan repayment gate check only asserts balance::value(&self.to_lend) >= self.last, so it is satisfied by any refill of to_lend regardless of who is credited for it. An attacker can loan(X) (draining to_lend by X), deposit(X) the borrowed coin (which refills to_lend back to >= last so check passes, while ALSO crediting the attacker's lender balance by X), and then withdraw(X) to pull that X back out. Each loan->deposit->withdraw cycle nets the attacker X while the pool's to_lend is left short, letting the pool be drained to zero.",
+      "exploit": true,
+      "patch": true
+    }
+  ]
+}

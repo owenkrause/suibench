@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "vulns": [
+    {
+      "id": "forged-witness-no-otw",
+      "module": "deep_pockets",
+      "title": "create_protocol accepts any drop witness without a one-time-witness check, so a forged witness mints a privileged AdminCap that drains the shared vault",
+      "severity": "critical",
+      "root_cause": "create_protocol is generic over `<T: drop>` and takes the witness by value (`_witness: T`) but never calls `sui::types::is_one_time_witness(&witness)`. The one-time-witness pattern is the only thing that is supposed to make protocol creation a once-per-module privilege: a genuine OTW type has exactly one instance, produced only by that module's `init`, so gating on `is_one_time_witness` guarantees `create_protocol` (and the `AdminCap` it returns) can be reached exactly once. With the check absent, ANY type with `drop` satisfies the bound, so an attacker declares a throwaway `struct A has drop {}`, calls `create_protocol(A {}, fee, coin::zero<EUR>(), ctx)`, and receives a fresh privileged `AdminCap` even though the module's own `init` already consumed the real one. That forged cap unlocks the admin-only `change_interest`, letting the attacker set `interest_bp` to 0 so that `borrow` accrues zero debt; `check_invariant` (`debt <= collateral * 7000 / 10000`) then passes with no collateral, and the attacker drains the entire shared `Protocol` loan vault. The fix is to assert `sui::types::is_one_time_witness(&witness)` (and drop the leading underscore so the witness is actually inspected) before creating the protocol and minting the cap."
+    }
+  ]
+}

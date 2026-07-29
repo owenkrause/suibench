@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "vulns": [
+    {
+      "id": "share-total-misstore",
+      "module": "margin_manager",
+      "title": "borrow stores the pool-global cumulative share total into a per-manager share field",
+      "severity": "critical",
+      "root_cause": "margin_pool::borrow returns the pool's GLOBAL cumulative total_borrow_shares as its third tuple element. borrow_base and borrow_quote assign that global total directly into the per-manager field (self.borrowed_base_shares = total_shares / self.borrowed_quote_shares = total_shares) instead of the incremental shares minted for THIS borrow. Every manager therefore records the whole pool's share total as its own debt, so repay and liquidation accounting (which reads borrowed_*_shares) over- or under-counts each manager's debt. The manager should add only the shares minted by this specific borrow, not the pool-wide running total."
+    },
+    {
+      "id": "repay-shares-truncation",
+      "module": "margin_manager",
+      "title": "partial-liquidation repay_shares truncates to zero, leaving debt shares unburned (bad debt)",
+      "severity": "high",
+      "root_cause": "In liquidate, for a partial liquidation repay_shares = math::mul(borrowed_shares, math::div(repay_amount, debt)). math::div truncates toward zero, so a small repay_amount relative to debt makes div(repay_amount, debt) round down to 0 and repay_shares become 0. The liquidation still splits the repay coin (plus pool reward) out of the position and calls margin_pool::repay_liquidation, but self.borrowed_*_shares - repay_shares is a no-op when repay_shares is 0. Assets leave the position while the recorded debt shares do not decrease, so the lending pool accrues bad debt. repay_shares must be derived so a nonzero repayment cannot round down to zero shares."
+    }
+  ]
+}

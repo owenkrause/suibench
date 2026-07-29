@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "vulns": [
+    {
+      "id": "abort-retry-randomness",
+      "module": "game",
+      "title": "Unfair randomness via abort-retry on losing draws",
+      "severity": "high",
+      "root_cause": "play draws randomness and settles the payout in the same transaction, so a caller can wrap it in a PTB and abort whenever the draw loses, committing only winning outcomes and extracting the pool."
+    }
+  ]
+}

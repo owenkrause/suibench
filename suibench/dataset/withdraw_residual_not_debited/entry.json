@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "vulns": [
+    {
+      "id": "residual-not-debited",
+      "module": "vault",
+      "title": "withdraw moves a residual to the treasury but debits the user's balance only by the withdrawn amount, leaving a phantom balance",
+      "severity": "high",
+      "root_cause": "On each withdrawal, a residual (`RESIDUAL_FEE`, modeling the dust left by NAVI's precision conversion) is split out of `funds` and moved to the `treasury` — real value leaves the vault on the caller's behalf. But the caller's recorded balance is decremented only by `amount` (`*bal = *bal - amount`), not by `amount + RESIDUAL_FEE`. So the residual is spent from the pool yet still counted as part of the user's claim: after each withdrawal the user's recorded `balances` entry overstates their real entitlement by the residual — a phantom balance. By repeatedly withdrawing, an attacker keeps their recorded balance inflated relative to what they deposited, and eventually withdraws that phantom balance as real SUI (the pool has been quietly drained of the residuals). The shortfall is borne by the vault and the other depositors, whose collective recorded balances now exceed the vault's actual `funds`. The fix is to debit the user for everything that leaves on their behalf: `*bal = *bal - amount - RESIDUAL_FEE`."
+    }
+  ]
+}

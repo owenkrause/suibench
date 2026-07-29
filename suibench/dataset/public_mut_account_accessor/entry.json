@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "vulns": [
+    {
+      "id": "public-mut-accessor",
+      "module": "market_maker",
+      "title": "account_mut is public, handing any caller a &mut to another user's Account, so an attacker drains a victim's collateral",
+      "severity": "critical",
+      "root_cause": "`account_mut(mm, owner)` returns `&mut Account` for an arbitrary `owner` and is declared `public`. It is meant to be an internal helper — `public(package)` — so that only the module's own vetted, ownership-checked flows can obtain a mutable reference to an account; `withdraw(account: &mut Account, ...)` then treats holding that `&mut` as proof of authority (it splits collateral out with no `ctx.sender() == account.owner` check, because a package-internal caller was assumed to have already authorized). With `account_mut` public, that assumption is false: any external module can call `account_mut(mm, victim)` to obtain `&mut` on the VICTIM's `Account` and pass it straight to `withdraw`, draining the victim's collateral. Exposing a `&mut` accessor to a value-bearing object across the package boundary hands out unmediated mutation of other users' state. The fix is to make `account_mut` `public(package)` (and/or have `withdraw` verify the caller owns the account) so a mutable account reference can only be produced through an authorized path.",
+      "exploit": true,
+      "patch": true
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+[package]
+name = "challenge"
+edition = "2024"
+
+[dependencies]

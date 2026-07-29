@@ -1,0 +1,9 @@
+[package]
+name = "challenge"
+edition = "2024"
+
+[dependencies]
+
+[addresses]
+integer_mate = "0x0"
+challenge = "0x0"

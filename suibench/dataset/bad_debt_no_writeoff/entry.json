@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "vulns": [
+    {
+      "id": "bad-debt-no-writeoff",
+      "module": "lending_pool",
+      "title": "defaulted debt is never written off the exchange rate, keeping cTokens overvalued so a redeem race lets early redeemers drain the pool",
+      "severity": "high",
+      "root_cause": "cTokens are priced by an exchange rate of `backing / total_ctokens`, where `backing = liquidity + total_debt` — outstanding loans are counted as a live pool asset because they are expected to be repaid. When a borrower becomes insolvent, `record_default` records the amount into a `defaulted` counter but NEVER subtracts it from `total_debt` (there is no write-off), so `backing` keeps including debt that will never be collected and the exchange rate stays inflated above the pool's real, redeemable value. The uncollectable shortfall is not socialized across all cToken holders; instead `redeem` pays each redeemer `ctokens * backing / total_ctokens` from actual `liquidity` at that inflated rate on a first-come basis. So a holder who redeems early (an attacker who monitors defaults and races to exit) receives full, un-discounted value and walks away whole, draining the real liquidity; the honest holders who redeem last find the cash exhausted and are left holding cTokens backed only by the bad debt — a bank run. The fix is to write off bad debt against `total_debt` (`total_debt -= defaulted`) when a default is recorded, so the exchange rate immediately reflects the loss and it is shared pro-rata by all holders.",
+      "exploit": true,
+      "patch": true
+    }
+  ]
+}

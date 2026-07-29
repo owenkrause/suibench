@@ -1,0 +1,8 @@
+[package]
+name = "challenge"
+edition = "legacy"
+
+[dependencies]
+
+[addresses]
+challenge = "0x0"

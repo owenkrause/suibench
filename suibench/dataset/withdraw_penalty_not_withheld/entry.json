@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "vulns": [
+    {
+      "id": "penalty-not-withheld",
+      "module": "liquidity_provider",
+      "title": "withdraw records the penalty as collected but pays out the gross amount, so the withdrawer keeps the penalty and the pool goes short",
+      "severity": "high",
+      "root_cause": "withdraw applies an early-withdrawal penalty: it computes `penalty` and adds it to `pool.penalty_collected`, recording that the penalty was charged. But the coin actually paid out is split for the GROSS `amount` (`balance::split(&mut pool.capital, amount)`) instead of the net `amount - penalty`. So the penalty is only ever deducted in the accounting field — it is never withheld from the transfer. The withdrawer receives the full `amount` (pocketing the penalty they were supposed to forfeit), while `penalty_collected` is credited a penalty that never materialized as retained capital: the pool's real `capital` balance is short by `penalty` on every withdrawal, a loss borne by the protocol and the remaining LPs. Repeated (or large) withdrawals steadily drain the pool of the un-withheld penalties. The fix is to pay out the net amount: `balance::split(&mut pool.capital, amount - penalty)`. This mirrors the Haedal HMM `withdraw_base_internal` bug (penalty burned from capital in accounting, but `base_coin_pay_out` called with the gross amount).",
+      "exploit": true,
+      "patch": true
+    }
+  ]
+}

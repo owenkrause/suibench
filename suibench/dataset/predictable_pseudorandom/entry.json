@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "vulns": [
+    {
+      "id": "predictable-seed",
+      "module": "random",
+      "title": "Predictable pseudo-randomness (caller-reproducible seed)",
+      "severity": "high",
+      "root_cause": "seed derives its randomness from bcs::to_bytes(ctx) concatenated with the bytes of a UID freshly created (and immediately deleted) in the same call, then hashed with sha3_256. Every input is either public transaction-context data or a UID whose derivation is deterministic and reproducible off-chain by the caller before submitting the transaction, so the resulting hash is not secret. rand_u64/rand_u64_range are pure functions of this seed, so all downstream rolls (monster hp/strength/defense in adventure::create_monster, loot drops in slay_boar, and the rare TreasuryBox drop in slay_boar_king) are predictable. An attacker can precompute the seed and outcome, and only submit (or keep retrying until they observe) transactions that yield the rare TreasuryBox drop or favorable monster stats, defeating the intended randomness of the game."
+    }
+  ]
+}

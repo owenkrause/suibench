@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "vulns": [
+    {
+      "id": "receipt-droppable",
+      "module": "pool",
+      "title": "FlashLoanReceipt is declared with the drop ability, so the borrower can discard it and never repay the loan",
+      "severity": "critical",
+      "root_cause": "The flash-loan safety guarantee relies on `FlashLoanReceipt` being a hot potato — a struct with NO abilities (no key/store/copy/drop). Such a value cannot be stored, copied, or dropped, so the only way to get rid of it is to pass it to a function in the defining module that unpacks it, i.e. `repay_flash_loan`, which is what forces every `flash_loan` to be repaid in the same transaction. Here the struct is declared `has drop`. With `drop`, the receipt returned by `flash_loan` can simply be discarded: the borrower calls `flash_loan(pool, amount)`, keeps the borrowed `Coin<SUI>`, and lets the `FlashLoanReceipt` fall out of scope (or binds it to `_`) — the compiler raises no error because a droppable value need not be consumed, and `repay_flash_loan` is never called. The pool is drained with no repayment. The fix is to give `FlashLoanReceipt` no abilities at all, restoring the must-consume-via-repay invariant.",
+      "exploit": true,
+      "patch": true
+    }
+  ]
+}

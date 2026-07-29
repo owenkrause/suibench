@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "vulns": [
+    {
+      "id": "unbound-state-authz",
+      "module": "mtoken",
+      "title": "revoke_transfer_ownership authorizes against an unbound caller-supplied State, so any type owner can steal the escrowed UpgradeCap",
+      "severity": "critical",
+      "root_cause": "Each token type has a `State<T>` recording an `owner`, and a `TransferOwnershipReq` escrows the real `UpgradeCap` while an ownership transfer is pending. `revoke_transfer_ownership<T>(state: &State<T>, req: TransferOwnershipReq, ...)` gates on `check_owner(state)` — but the generic `State<T>` argument is NOT bound to the `req`: the request carries no record of which `T` (or which State) it belongs to, so the function trusts whatever `State<T>` the caller passes. Anyone can permissionlessly `create_state<Fake>` for a throwaway type and become its `owner`, so an attacker deploys their own `State<Fake>`, passes it together with a VICTIM's `TransferOwnershipReq`, and `check_owner` passes against the attacker's own state — then the escrowed `UpgradeCap` is `public_transfer`'d to the attacker. The authorization checks ownership of the wrong object. The fix is to bind the request to its state (store and verify the originating `State<T>`'s id / type on the `TransferOwnershipReq`) so the `State<T>` presented at revoke must be the exact one the request was created against.",
+      "exploit": true,
+      "patch": true
+    }
+  ]
+}

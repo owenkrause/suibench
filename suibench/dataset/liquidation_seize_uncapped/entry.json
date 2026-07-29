@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "vulns": [
+    {
+      "id": "seize-uncapped",
+      "module": "lending",
+      "title": "liquidate seizes collateral not capped by the debt repaid, so a liquidator repays a tiny amount and takes all collateral",
+      "severity": "critical",
+      "root_cause": "A liquidation should only let the liquidator seize collateral in proportion to the debt they actually repay (typically `repay * (1 + liquidation_bonus)` worth of collateral, capped at the position's collateral). `liquidate` verifies the loan is underwater and reduces `debt` by the `repayment` amount, but the amount of collateral it seizes is computed as `balance::value(&loan.collateral)` — the ENTIRE remaining collateral — with no cap tied to `repay`. So a liquidator repays a trivial amount of debt (even 1) and walks away with the borrower's whole collateral balance. The borrower is left with almost all of their debt still outstanding but none of their collateral. An attacker watches for any position that dips underwater and liquidates it with a dust repayment to strip its full collateral, far exceeding the debt they cleared. The fix is to cap the seizure by the repayment: `seize = min(collateral, repay * bonus_factor)`, so collateral taken is bounded by debt repaid.",
+      "exploit": true,
+      "patch": true
+    }
+  ]
+}

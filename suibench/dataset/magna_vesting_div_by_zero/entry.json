@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "vulns": [
+    {
+      "id": "vesting-div-by-zero",
+      "module": "vesting",
+      "title": "deserialized vesting-piece divisors are unchecked, so a zero period aborts withdraw with a division-by-zero and permanently bricks the funds",
+      "severity": "medium",
+      "root_cause": "The vesting allocation is committed at `create` as raw serialized bytes and only decoded at withdrawal by `deserialize_piece`, which BCS-peels `period_length` and `number_of_periods` without asserting either is greater than zero. `calc_vested_piece_amount` then computes `elapsed_time / piece.period_length` and `piece.amount * fully_vested_periods / piece.number_of_periods`. Move's `/` aborts on a zero divisor, so an allocation whose bytes encode `period_length == 0` (or `number_of_periods == 0`) makes every `withdraw` call abort. Because the allocation bytes are fixed in the committed `Vesting` object (in the real system, an immutable merkle root that cannot be amended), the abort is permanent: the vested funds are locked forever. This is an availability / griefing denial-of-service, not a theft. The fix is to validate `period_length > 0` and `number_of_periods > 0` when the piece is deserialized (or reject the allocation at commit time).",
+      "harm": "availability",
+      "exploit": true,
+      "patch": true
+    }
+  ]
+}

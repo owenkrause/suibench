@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "vulns": [
+    {
+      "id": "cancel-missing-owner",
+      "module": "marketplace",
+      "title": "Missing owner check in cancel_listing",
+      "severity": "high",
+      "root_cause": "cancel_listing ignores the seller field stored in the Listing and performs no ctx.sender() check, so any party who can reference the shared listing object can cancel it and receive the seller's item.",
+      "exploit": true,
+      "patch": true
+    }
+  ]
+}

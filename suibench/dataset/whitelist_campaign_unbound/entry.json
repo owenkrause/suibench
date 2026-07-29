@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "vulns": [
+    {
+      "id": "whitelist-unbound-campaign",
+      "module": "launchpad",
+      "title": "invest never checks the whitelist belongs to the campaign so any campaign whitelist unlocks any other",
+      "severity": "high",
+      "root_cause": "invest gates participation on `vec_set::contains(&whitelist.members, sender)`, but it never checks that the `whitelist` passed in actually belongs to the `campaign` being invested in — there is no `assert!(whitelist.campaign_id == object::id(campaign))`. Both `Campaign` and `Whitelist` are shared objects, and each `Whitelist` records the `campaign_id` it was created for, but the two are passed as independent arguments and their correspondence is never validated. So an attacker who is on ANY campaign's whitelist (e.g. their own campaign, or a public/cheap campaign they were legitimately whitelisted for) can pass that whitelist together with a DIFFERENT campaign to `invest`, pass the membership check against the wrong list, and take an allocation in a gated sale they were never whitelisted for — diluting or crowding out the campaign's legitimately whitelisted investors. The fix is to bind the two: assert `whitelist.campaign_id == object::id(campaign)` in `invest`.",
+      "exploit": true,
+      "patch": true
+    }
+  ]
+}
