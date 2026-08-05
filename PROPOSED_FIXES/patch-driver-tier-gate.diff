@@ -1,0 +1,27 @@
+diff --git a/suibench/src/bench/patch-driver.ts b/suibench/src/bench/patch-driver.ts
+index 1fb743b..e44b197 100644
+--- a/suibench/src/bench/patch-driver.ts
++++ b/suibench/src/bench/patch-driver.ts
+@@ -143,9 +143,19 @@ export async function benchPatch(
+   const gradable = entryDirs
+     .map(loadEntry)
+     .filter((entry) => {
+-      if (entry.functionalPath) return true;
+-      console.error(`[patch] ${entry.target}: SKIPPED — no functional.ts (not patch-gradable)`);
+-      return false;
++      if (!entry.functionalPath) {
++        console.error(`[patch] ${entry.target}: SKIPPED — no functional.ts (not patch-gradable)`);
++        return false;
++      }
++      // A detect-tier entry has no check.ts, so `loadCheck` in patchEntryOnce
++      // would throw and abort the whole corpus run. Skip it here instead. An
++      // entry that ships exploits/patches but no check.ts is misconfigured, not
++      // patch-gradable — surface it loudly rather than crashing every entry.
++      if (entry.tier !== "confirmed") {
++        console.error(`[patch] ${entry.target}: SKIPPED — detect-tier (no check.ts); ships functional.ts but is not patch-gradable`);
++        return false;
++      }
++      return true;
+     });
+   if (gradable.length === 0) {
+     throw new Error("no patch-gradable entries matched (functional.ts required)");
