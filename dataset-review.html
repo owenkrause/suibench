@@ -1,0 +1,210 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>suibench dataset review — overview</title>
+<style>
+:root{
+  --bg:#0e1420;--panel:#161d2b;--panel2:#1d2634;--line:#2b3648;--ink:#e8eef6;--dim:#9db0c6;
+  --accent:#5aa2ff;--ok:#6ee7a8;--warn:#f2b45d;--bad:#ff8a80;--vio:#c6a8ff;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+}
+@media(prefers-color-scheme:light){:root{
+  --bg:#f7f9fc;--panel:#fff;--panel2:#eef2f7;--line:#dce3ec;--ink:#141a24;--dim:#5a6b7e;
+  --accent:#1666d6;--ok:#12894a;--warn:#a5620d;--bad:#c53a30;--vio:#6b40c4;}}
+:root[data-theme=dark]{--bg:#0e1420;--panel:#161d2b;--panel2:#1d2634;--line:#2b3648;--ink:#e8eef6;--dim:#9db0c6;--accent:#5aa2ff;--ok:#6ee7a8;--warn:#f2b45d;--bad:#ff8a80;--vio:#c6a8ff;}
+:root[data-theme=light]{--bg:#f7f9fc;--panel:#fff;--panel2:#eef2f7;--line:#dce3ec;--ink:#141a24;--dim:#5a6b7e;--accent:#1666d6;--ok:#12894a;--warn:#a5620d;--bad:#c53a30;--vio:#6b40c4;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.6 var(--sans);
+  background-image:radial-gradient(120% 60% at 50% -10%, color-mix(in srgb,var(--accent) 8%, transparent), transparent);}
+.wrap{max-width:1040px;margin:0 auto;padding:52px 22px 100px}
+.eyebrow{font:600 12px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin:0 0 14px}
+h1{font-size:38px;line-height:1.1;letter-spacing:-.025em;margin:0 0 14px;font-weight:700}
+.lede{font-size:19px;line-height:1.5;color:var(--ink);margin:0 0 8px;max-width:70ch}
+.lede b{color:var(--ok)}
+.muted{color:var(--dim);font-size:14.5px;max-width:72ch}
+section{margin-top:52px}
+h2{font-size:13px;font-family:var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--dim);margin:0 0 18px;font-weight:600}
+h3{font-size:20px;letter-spacing:-.01em;margin:0 0 10px}
+code{font-family:var(--mono);font-size:.86em;background:var(--panel2);border:1px solid var(--line);border-radius:5px;padding:1px 5px}
+a{color:var(--accent)}
+/* stat row */
+.stats{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 16px;text-align:center}
+.stat .n{font:700 30px/1 var(--mono);letter-spacing:-.02em}
+.stat .l{font-size:11.5px;color:var(--dim);margin-top:8px;text-transform:uppercase;letter-spacing:.05em;line-height:1.3}
+.n.ok{color:var(--ok)}.n.bad{color:var(--bad)}.n.acc{color:var(--accent)}.n.vio{color:var(--vio)}.n.warn{color:var(--warn)}
+/* mechanism diagram */
+.mech{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:26px 24px}
+.mech h3{margin-bottom:6px}
+.mech .cap{color:var(--dim);font-size:14.5px;margin:0 0 22px;max-width:74ch}
+.flow{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.step{border:1px solid var(--line);border-radius:11px;padding:16px;background:var(--panel2);position:relative}
+.step .tag{font:600 11px/1 var(--mono);text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
+.step .mid{font-size:14px;margin:10px 0;color:var(--ink);min-height:56px}
+.step .res{font:600 13px/1.3 var(--sans);display:flex;align-items:center;gap:7px}
+.dot{width:10px;height:10px;border-radius:50%;flex:none}
+.pass .dot{background:var(--ok)}.pass .res{color:var(--ok)}
+.fail .dot{background:var(--bad)}.fail .res{color:var(--bad)}
+.trap{border-color:color-mix(in srgb,var(--bad) 55%,var(--line))}
+.verdict-bad{margin-top:14px;padding:12px 14px;border-radius:10px;background:color-mix(in srgb,var(--bad) 12%,var(--panel));border:1px solid color-mix(in srgb,var(--bad) 40%,var(--line));font-size:14.5px}
+.verdict-bad b{color:var(--bad)}
+/* systemic cards */
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 18px}
+.card .id{font:700 12px/1 var(--mono);color:var(--bg);border-radius:5px;padding:4px 7px;margin-right:9px}
+.card.c-crit .id{background:var(--bad)}.card.c-high .id{background:var(--warn)}.card.c-med .id{background:var(--accent)}
+.card h4{display:flex;align-items:center;margin:0 0 8px;font-size:15.5px}
+.card p{margin:0;font-size:14px;color:var(--dim);line-height:1.55}
+.card .ev{margin-top:9px;font:600 11.5px/1 var(--mono);color:var(--ok)}
+.card .ev.static{color:var(--accent)}
+/* table */
+.tblwrap{overflow-x:auto;border:1px solid var(--line);border-radius:12px}
+table{width:100%;border-collapse:collapse;font-size:13.5px;min-width:640px}
+th,td{text-align:left;padding:11px 14px;border-bottom:1px solid var(--line)}
+th{font:600 11px/1.4 var(--mono);letter-spacing:.05em;text-transform:uppercase;color:var(--dim);background:var(--panel2)}
+tbody tr:last-child td{border-bottom:0}
+tbody tr:hover{background:var(--panel)}
+td .gain{font-family:var(--mono);color:var(--ok);font-weight:600}
+/* fixes */
+.fixgrid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.fixcol{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px}
+.fixcol h3{font-size:16px;margin-bottom:4px}
+.fixcol .sub{color:var(--dim);font-size:13px;margin:0 0 14px}
+.orc{display:flex;align-items:center;gap:9px;padding:8px 0;border-top:1px solid var(--line);font-size:13.5px}
+.orc:first-of-type{border-top:0}
+.badge{font:600 10px/1 var(--mono);padding:4px 6px;border-radius:4px;flex:none}
+.badge.v{background:color-mix(in srgb,var(--ok) 20%,transparent);color:var(--ok);border:1px solid color-mix(in srgb,var(--ok) 45%,var(--line))}
+.badge.p{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn);border:1px solid color-mix(in srgb,var(--warn) 45%,var(--line))}
+.orc code{font-size:12px}
+/* doorways */
+.doors{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.door{display:block;text-decoration:none;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:22px;transition:border-color .15s,transform .15s}
+.door:hover{border-color:var(--accent);transform:translateY(-2px)}
+.door .k{font:600 11px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--accent)}
+.door h3{margin:10px 0 6px;color:var(--ink)}
+.door p{margin:0;color:var(--dim);font-size:13.5px}
+.foot{margin-top:56px;padding-top:20px;border-top:1px solid var(--line);color:var(--dim);font-size:12.5px;line-height:1.6}
+@media(max-width:820px){.stats{grid-template-columns:repeat(2,1fr)}.flow,.grid,.fixgrid,.doors{grid-template-columns:1fr}}
+</style>
+<div class="wrap">
+
+<p class="eyebrow">Dataset review · overview</p>
+<h1>suibench dataset — does each entry grade a model correctly?</h1>
+<p class="lede">The Move code and the labeled vulnerabilities are real and well-chosen. The issues sit in the <b>grading layer</b> — and several of them make a model that does <i>good</i> analysis score <i>worse</i> than one that does shallow analysis.</p>
+<p class="muted">This page is the digestible overview. The full evidence is in <a href="DATASET_REVIEW.md">DATASET_REVIEW.md</a>; ready-to-apply fixes are in <a href="PROPOSED_FIXES/">PROPOSED_FIXES/</a>. Every finding survived an adversarial review that tried to refute it; the highest-impact ones were confirmed by running the exploits on a localnet.</p>
+
+<section>
+<h2>At a glance</h2>
+<div class="stats">
+  <div class="stat"><div class="n acc">98</div><div class="l">findings across 44 / 45 entries</div></div>
+  <div class="stat"><div class="n ok">0</div><div class="l">refuted after two adversarial passes</div></div>
+  <div class="stat"><div class="n bad">9</div><div class="l">confirmed by on-chain execution</div></div>
+  <div class="stat"><div class="n warn">11</div><div class="l">systemic defects</div></div>
+  <div class="stat"><div class="n vio">5</div><div class="l">missing oracles (3 verified + 2 spec)</div></div>
+</div>
+</section>
+
+<section>
+<h2>The core defect, in one picture</h2>
+<div class="mech">
+<h3>How a correct finding is scored as a false positive</h3>
+<p class="cap">The benchmark credits an exploit to a bug by re-running it with the bug's gold patch applied: if the patch stops it, the label is credited. But several entries contain a second, <b>unlabeled</b> bug that the patch does not touch — so the exploit for it survives the patch, the attribution comes back empty, and the model is scored wrong.</p>
+<div class="flow">
+  <div class="step pass">
+    <div class="tag">Vulnerable build · labeled exploit</div>
+    <div class="mid">The reference exploit runs and drains the pool.</div>
+    <div class="res"><span class="dot"></span>check passes — correct</div>
+  </div>
+  <div class="step fail">
+    <div class="tag">Patched build · labeled exploit</div>
+    <div class="mid">The gold patch closes the labeled path; the same exploit aborts.</div>
+    <div class="res"><span class="dot"></span>check fails — patch works</div>
+  </div>
+  <div class="step pass trap">
+    <div class="tag">Patched build · <b>unlabeled</b> drain</div>
+    <div class="mid">A second bug the patch never touched still drains the pool.</div>
+    <div class="res"><span class="dot"></span>check passes — the trap</div>
+  </div>
+</div>
+<div class="verdict-bad">Because the drain still succeeds under <i>every</i> gold patch, attribution is empty and the finding is bucketed as a <b>false positive</b> — even though the model found and exploited a real, more severe bug. Measured on-chain in 9 entries (systemic defect <b>S1</b>).</div>
+</div>
+</section>
+
+<section>
+<h2>Confirmed on-chain</h2>
+<p class="muted" style="margin-bottom:16px">Each entry's base and gold-patched builds were republished on a localnet and the exploits run. The unlabeled drain's measured attacker gain on the <i>patched</i> build, all above the entry's <code>check.ts</code> threshold:</p>
+<div class="tblwrap"><table>
+<thead><tr><th>Entry</th><th>Unlabeled drain</th><th>Gain on patched build</th></tr></thead>
+<tbody>
+<tr><td><code>withdraw_penalty_not_withheld</code></td><td>no-deposit <code>withdraw</code></td><td><span class="gain">+95000</span> (thr 1000)</td></tr>
+<tr><td><code>order_overfill_original_quantity</code></td><td>own-order <code>take</code>, no payment</td><td><span class="gain">+10000</span> (thr 5000)</td></tr>
+<tr><td><code>signature_unbound_coin_type</code></td><td>own-<code>Server</code> mint</td><td><span class="gain">+1000</span> (thr 500)</td></tr>
+<tr><td><code>bad_debt_no_writeoff</code></td><td>permissionless <code>borrow</code></td><td><span class="gain">+600</span> (thr 400)</td></tr>
+<tr><td><code>pool_type_index_mismatch</code></td><td>no-deposit <code>withdraw&lt;VAL&gt;</code></td><td><span class="gain">+500</span> (thr 300)</td></tr>
+<tr><td><code>harvest_min_return_self_reported</code></td><td>18 compliant harvest cycles</td><td><span class="gain">+312</span> (thr 300)</td></tr>
+<tr><td><code>concentrated_pool</code></td><td>pricing-asymmetry skim (no overflow)</td><td><span class="gain">+99 COINB</span> (thr 90)</td></tr>
+<tr><td><code>movectf2024_swap_flashloan</code></td><td>dynamically-sized flash-swap</td><td><span class="gain">+91 COINB</span> (thr 90)</td></tr>
+<tr><td><code>generic_type_unbound_upgradecap</code></td><td>publish any package → own <code>UpgradeCap</code></td><td><span class="gain">count 0→1</span></td></tr>
+</tbody>
+</table></div>
+</section>
+
+<section>
+<h2>The eleven systemic defects</h2>
+<div class="grid">
+  <div class="card c-crit"><h4><span class="id">S1</span>Unlabeled drain survives the gold patch</h4><p>A correct, more-severe finding is scored a false positive. The single biggest source of mis-scoring.</p><div class="ev">execution-confirmed · 9 entries</div></div>
+  <div class="card c-high"><h4><span class="id">S2</span>Check satisfiable without the labeled bug</h4><p>A path that never uses the labeled bug still passes, so a label is credited for the wrong reason.</p><div class="ev">execution-confirmed</div></div>
+  <div class="card c-high"><h4><span class="id">S3</span>Thresholds tuned to the reference exploit</h4><p>Pass constants equal the shipped exploit's yield, not the ceiling a patched build allows — so larger correct exploits fail.</p><div class="ev">execution-confirmed</div></div>
+  <div class="card c-high"><h4><span class="id">S4</span>Single-label monoculture</h4><p>All 32 confirmed entries carry one label, so attribution can never discriminate between competing bugs.</p><div class="ev static">census-confirmed</div></div>
+  <div class="card c-crit"><h4><span class="id">S5</span>Five entries mis-tiered as detect</h4><p>They ship exploits and patches but no <code>check.ts</code>, so they are never execution-graded — and one aborts the whole patch run.</p><div class="ev">fixed · 4 oracles verified</div></div>
+  <div class="card c-high"><h4><span class="id">S6</span>Patch axis can't tell repair from deletion</h4><p>A patch that just disables a function scores full credit when <code>functional.ts</code> never calls it.</p><div class="ev static">confirmed</div></div>
+  <div class="card c-med"><h4><span class="id">S7</span>Decontamination leaks</h4><p>The entry name, a compiler warning, and source comments leak the bug into the model-visible surface.</p><div class="ev">compiler-leak executed</div></div>
+  <div class="card c-med"><h4><span class="id">S8</span>Negative controls carry little signal</h4><p>Only two, both distinguishable by a trivial grep and adversarial by construction — a thin false-positive base.</p><div class="ev static">confirmed</div></div>
+  <div class="card c-med"><h4><span class="id">S9</span>Availability oracles ignore the abort reason</h4><p>They pass on any non-success, so an unrelated abort is credited as the DoS.</p><div class="ev static">confirmed</div></div>
+  <div class="card c-med"><h4><span class="id">S10</span>Label metadata: severity & harm</h4><p>78% "critical" with exact-match scoring punishes a consistent responder; <code>harm</code> is unset on 45 of 48 labels.</p><div class="ev static">census-confirmed</div></div>
+  <div class="card c-med"><h4><span class="id">S11</span>SOURCE.md drift</h4><p>Nine provenance files describe a layout that no longer matches disk — the likely cause of the missing oracles.</p><div class="ev static">confirmed</div></div>
+</div>
+</section>
+
+<section>
+<h2>Proposed fixes — ready to apply</h2>
+<div class="fixgrid">
+  <div class="fixcol">
+    <h3>Five missing oracles</h3>
+    <p class="sub">Drop-in <code>check.ts</code> for the mis-tiered entries (S5). Verified on a localnet: the reference exploit passes on the vulnerable build and the gold patch makes it fail.</p>
+    <div class="orc"><span class="badge v">VERIFIED</span><code>time_unit_mismatch</code></div>
+    <div class="orc"><span class="badge v">VERIFIED</span><code>whitelist_campaign_unbound</code></div>
+    <div class="orc"><span class="badge v">VERIFIED</span><code>shared_object_race</code></div>
+    <div class="orc"><span class="badge p">SPEC</span><code>ownership_escape</code> — shared-object oracle, design note</div>
+    <div class="orc"><span class="badge p">SPEC</span><code>cetus-integer-overflow</code> — shared-object oracle, design note</div>
+  </div>
+  <div class="fixcol">
+    <h3>One code fix</h3>
+    <p class="sub">A detect-tier entry with a <code>functional.ts</code> currently aborts the whole patch-mode run. The gate skips it with a clear log instead.</p>
+    <div class="orc"><span class="badge v">BUILDS · TESTS PASS</span><code>patch-driver-tier-gate.diff</code></div>
+    <p class="sub" style="margin-top:16px">The larger design-level fixes — real accounting so the labeled bug is the only reachable one, thresholds derived from the patched ceiling, discriminative attribution — are written up per-entry in the report, left as proposals because they change grading semantics.</p>
+  </div>
+</div>
+</section>
+
+<section>
+<h2>Read on</h2>
+<div class="doors">
+  <a class="door" href="DATASET_REVIEW.md">
+    <div class="k">The full review</div>
+    <h3>DATASET_REVIEW.md →</h3>
+    <p>Systemic defects in depth, then every surviving finding grouped by entry with its evidence and a concrete fix.</p>
+  </a>
+  <a class="door" href="PROPOSED_FIXES/">
+    <div class="k">Ready-to-apply</div>
+    <h3>PROPOSED_FIXES/ →</h3>
+    <p>The five oracles, the patch-driver fix, and the localnet verification evidence. Nothing here modifies an existing file.</p>
+  </a>
+</div>
+</section>
+
+<div class="foot">
+Method: a Move-semantics review of all 45 entries across eight dimensions — vulnerability reality, oracle soundness, patch narrowness, exploit validity, unlabeled defects, tier consistency, decontamination, and label quality. Every finding was attacked by an independent reviewer instructed to refute it; none was refuted, 19 were narrowed to a weaker accurate form. The nine highest-impact findings were confirmed by republishing each entry's base and gold-patched builds on a Sui localnet (sui CLI 1.69.2) and running the exploits. Localnet is not the pinned Docker image; pass/fail verdicts and measured gains are the load-bearing results.
+</div>
+
+</div>
