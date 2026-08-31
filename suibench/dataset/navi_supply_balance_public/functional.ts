@@ -17,29 +17,21 @@
 // shape — the runner only ever calls `attack`. Signs with the ADMIN keypair.
 import { Transaction } from "@mysten/sui/transactions";
 
+interface CreatedObject {
+  readonly id: string;
+  readonly type: string;
+}
+
 interface FunctionalContext {
   client: {
-    getOwnedObjects(input: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
-    queryTransactionBlocks(input: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: {
-        objectChanges?: {
-          type: string;
-          objectType?: string;
-          objectId?: string;
-        }[];
-      }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
     core: {
+      listOwnedObjects(input: {
+        owner: string;
+        type?: string;
+        include?: { json?: boolean };
+      }): Promise<{
+        objects: { objectId: string; type: string; json?: unknown }[];
+      }>;
       signAndExecuteTransaction: (input: {
         transaction: Transaction;
         signer: unknown;
@@ -47,6 +39,9 @@ interface FunctionalContext {
       }) => Promise<{ $kind?: string; FailedTransaction?: unknown }>;
       waitForTransaction: (input: { result: unknown }) => Promise<unknown>;
     };
+  };
+  chain: {
+    findCreatedObjects(sender: string): Promise<readonly CreatedObject[]>;
   };
   packageId: string;
   admin: unknown;
@@ -56,42 +51,26 @@ interface FunctionalContext {
 
 async function findStorage(ctx: FunctionalContext): Promise<string> {
   const storageType = `${ctx.packageId}::storage::Storage`;
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: ctx.adminAddress },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data) {
-      for (const change of tx.objectChanges ?? []) {
-        if (
-          change.type === "created" &&
-          change.objectType === storageType &&
-          change.objectId
-        ) {
-          return change.objectId;
-        }
-      }
-    }
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
+  const storage = (await ctx.chain.findCreatedObjects(ctx.adminAddress)).find(
+    (object) => object.type === storageType,
+  );
+  if (storage) return storage.id;
   throw new Error("functional: could not locate the shared Storage");
 }
 
 // The admin still holds the remainder of the 1_000_000 TOKEN mint after setup.
 async function findAdminToken(ctx: FunctionalContext): Promise<string> {
-  const owned = await ctx.client.getOwnedObjects({
+  const { objects } = await ctx.client.core.listOwnedObjects({
     owner: ctx.adminAddress,
-    filter: { StructType: `0x2::coin::Coin<${ctx.packageId}::token::TOKEN>` },
-    options: { showType: true },
+    type: `0x2::coin::Coin<${ctx.packageId}::token::TOKEN>`,
+    include: { json: true },
   });
-  const id = owned.data[0]?.data?.objectId;
+  const id = objects[0]?.objectId;
   if (!id) throw new Error("functional: admin holds no TOKEN coin");
   return id;
 }
 
-export async function attack(ctx: FunctionalContext): Promise<void> {
+export async function functional(ctx: FunctionalContext): Promise<void> {
   const storageId = await findStorage(ctx);
   const tokenId = await findAdminToken(ctx);
 
@@ -121,5 +100,3 @@ export async function attack(ctx: FunctionalContext): Promise<void> {
   await ctx.client.core.waitForTransaction({ result: res });
 }
 
-/** Readable alias — the confirmer runner only ever calls `attack`. */
-export const functional = attack;

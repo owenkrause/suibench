@@ -1,7 +1,8 @@
 module challenge::vault {
     use sui::coin::{Self, Coin};
-    use sui::tx_context::{TxContext};
+    use sui::tx_context::{Self, TxContext};
     use sui::balance::{Self, Balance};
+    use sui::event;
     use sui::object::{Self, UID};
     use sui::transfer;
     use challenge::token::TOKEN;
@@ -16,6 +17,12 @@ module challenge::vault {
     struct RefundTicket has key, store {
         id: UID,
         amount: u64,
+    }
+
+    struct RefundClaimed has copy, drop {
+        actor: address,
+        deposited_amount: u64,
+        paid_amount: u64,
     }
 
     public fun open(coin: Coin<TOKEN>, ctx: &mut TxContext) {
@@ -38,8 +45,15 @@ module challenge::vault {
         // shipped code omitted the divide, paying out DECIMAL_PRECISION-times too
         // much; restoring the `/ DECIMAL_PRECISION` refunds precisely ticket.amount.
         let amount_to_refund = ticket.amount * DECIMAL_PRECISION / DECIMAL_PRECISION;
-        let RefundTicket { id, amount: _ } = ticket;
+        let RefundTicket { id, amount } = ticket;
         object::delete(id);
-        coin::take(&mut vault.investment_balance, amount_to_refund, ctx)
+        let refund = coin::take(&mut vault.investment_balance, amount_to_refund, ctx);
+        let paid_amount = coin::value(&refund);
+        event::emit(RefundClaimed {
+            actor: tx_context::sender(ctx),
+            deposited_amount: amount,
+            paid_amount,
+        });
+        refund
     }
 }

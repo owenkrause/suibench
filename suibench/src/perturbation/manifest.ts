@@ -12,7 +12,8 @@
 //  - OTW invariant: a witness struct must be its module name upper-cased, so
 //    when module `token` → `t_alpha` the witness `TOKEN` → `T_ALPHA` (§2, A2).
 //  - Closure: every extracted symbol gets a rename, and `from` values are unique
-//    across the manifest (the closure gate §3.4-5 then verifies none survives).
+//    within the module/member namespace (the closure gate §3.4-5 then verifies
+//    none survives).
 import type { RenameManifest, Rename, EntrySymbols } from "./types.js";
 
 /**
@@ -237,17 +238,24 @@ export function buildRenameManifest(
 }
 
 /**
- * Manifest soundness (used by the builder and the unit tests): unique `from`s,
- * unique `to`s, no rename is a no-op, and no new name collides with a surviving
- * foreign symbol we don't rename.
+ * Manifest soundness (used by the builder and the unit tests): unique `from`s
+ * within the module/member namespace, unique `to`s, no rename is a no-op, and
+ * no new name collides with a surviving foreign symbol we don't rename.
+ *
+ * Move modules and their members occupy distinct syntactic namespaces. A module
+ * and one of its functions may therefore legitimately share a spelling (for
+ * example `lock::lock`). The source and harness rewriters also resolve module
+ * and member positions separately, so only duplicates within one of those two
+ * namespaces are ambiguous.
  */
 export function assertManifestSound(all: Rename[]): void {
   const froms = new Set<string>();
   const tos = new Set<string>();
   for (const r of all) {
-    if (froms.has(r.from))
+    const sourceKey = `${r.kind === "module" ? "module" : "member"}\0${r.from}`;
+    if (froms.has(sourceKey))
       throw new Error(`twin/manifest: duplicate rename source "${r.from}"`);
-    froms.add(r.from);
+    froms.add(sourceKey);
     if (r.from === r.to)
       throw new Error(`twin/manifest: no-op rename for "${r.from}"`);
     // A `to` may legitimately repeat ONLY for the witness↔module pair (module

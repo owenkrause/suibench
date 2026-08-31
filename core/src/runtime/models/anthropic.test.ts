@@ -1,8 +1,30 @@
 import { describe, it, expect } from "vitest";
+import type Anthropic from "@anthropic-ai/sdk";
 import {
   effortToBudgetTokens,
   anthropicReasoningParams,
+  fromAnthropicMessage,
 } from "./anthropic.js";
+
+function anthropicMessage(over: Partial<Anthropic.Message>): Anthropic.Message {
+  return {
+    id: "msg_1",
+    type: "message",
+    role: "assistant",
+    model: "claude-fable-5",
+    content: [{ type: "text", text: "hi" }],
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    stop_details: null,
+    usage: {
+      input_tokens: 10,
+      output_tokens: 5,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    },
+    ...over,
+  } as Anthropic.Message;
+}
 
 describe("effortToBudgetTokens", () => {
   it("maps each effort tier to its budget when max_tokens has room", () => {
@@ -46,5 +68,33 @@ describe("anthropicReasoningParams", () => {
     const p = anthropicReasoningParams("qwen-max", "medium", 32_000);
     expect(p.thinking).toBeUndefined();
     expect(p.output_config).toBeUndefined();
+  });
+});
+
+describe("fromAnthropicMessage", () => {
+  it("surfaces a safety refusal distinctly, with its stop_details", () => {
+    const res = fromAnthropicMessage(
+      anthropicMessage({
+        stop_reason: "refusal",
+        stop_details: {
+          type: "refusal",
+          category: "cyber",
+          explanation: "declined to produce an exploit",
+        },
+      }),
+    );
+    expect(res.stopReason).toBe("refusal");
+    expect(res.refusal).toEqual({
+      category: "cyber",
+      explanation: "declined to produce an exploit",
+    });
+  });
+
+  it("does not conflate a normal completion with a refusal", () => {
+    const res = fromAnthropicMessage(
+      anthropicMessage({ stop_reason: "end_turn" }),
+    );
+    expect(res.stopReason).toBe("end_turn");
+    expect(res.refusal).toBeUndefined();
   });
 });

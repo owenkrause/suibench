@@ -1,0 +1,15 @@
+# Scoped to the suibench image build (BuildKit reads this in preference to a
+# context-root .dockerignore). Patterns are relative to the build context, the
+# repo root.
+#
+# pnpm regenerates node_modules inside the image via `pnpm install`, and the
+# pruned deploy carries only what it needs — copying workspace node_modules would
+# ship broken store symlinks and bloat the context.
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+**/.turbo
+.git
+.claude
+# Not part of the suibench grading images — keep it out of the context.
+backend

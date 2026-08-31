@@ -1,11 +1,13 @@
 {
+  "id": "chal_671b2575",
   "version": 1,
   "vulns": [
     {
       "id": "overfill-original-qty",
       "module": "orderbook",
       "title": "take fills against the maker order's original quantity instead of its remaining, so a partially-filled order is over-filled",
-      "severity": "critical",
+      "severity": "high",
+      "harm": "state",
       "root_cause": "A resting maker order tracks both its `quantity` (the original size) and `filled` (how much has already been matched), so its true available size is `quantity - filled`. When a taker matches against it, `take` computes the fill as `min(take_qty, order.quantity)` — it caps the fill by the ORIGINAL quantity, never subtracting `filled`. So an order that has already been (say) 90% filled can still be matched for up to its full original quantity again. Each fill pulls `fill` base out of the maker's shared `Manager` balance (which backs the maker's deposits and other resting orders), so a taker repeatedly matching a nearly-exhausted order drains the maker's account far beyond the amount that order ever offered — the maker is forced to deliver base they never committed to this order, at its (possibly now off-market) price. An attacker seeds a small partially-filled order and over-fills it to siphon the maker's balance. The fix is to fill against the remaining size: `fill = min(take_qty, order.quantity - order.filled)` (and to skip expired orders).",
       "exploit": true,
       "patch": true

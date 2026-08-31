@@ -72,7 +72,14 @@ module challenge::vault{
     // mid-price no longer lets a tiny input capture the whole reserve. `k` is
     // captured from the reserves BEFORE the deposit and widened to u128 to avoid
     // overflow.
+    //
+    // The `!flashed` guard is load-bearing: CPMM pricing alone is still drainable
+    // because a flash loan can borrow an ENTIRE reserve, making k=0 at swap time so
+    // the invariant degenerates and any input takes the whole opposite side. Barring
+    // swaps against a pool with a loan outstanding removes that manipulation vector;
+    // a legitimate flash user borrows, uses the funds elsewhere, and repays.
     public fun swap_a_to_b<A,B>(vault: &mut Vault<A,B>, coina:Coin<A>, ctx: &mut TxContext): Coin<B> {
+            assert!(!vault.flashed, 2);
             let reserve_a = balance::value(&vault.coin_a);
             let reserve_b = balance::value(&vault.coin_b);
             let k = (reserve_a as u128) * (reserve_b as u128);
@@ -84,6 +91,7 @@ module challenge::vault{
     }
 
     public fun swap_b_to_a<A,B>(vault: &mut Vault<A,B>, coinb:Coin<B>, ctx: &mut TxContext): Coin<A> {
+            assert!(!vault.flashed, 2);
             let reserve_a = balance::value(&vault.coin_a);
             let reserve_b = balance::value(&vault.coin_b);
             let k = (reserve_a as u128) * (reserve_b as u128);

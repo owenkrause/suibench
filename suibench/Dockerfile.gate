@@ -1,0 +1,10 @@
+# The gate: a pure gRPC-Web forwarder. node:slim + a self-contained esbuild bundle
+# — no sui CLI, no .move cache, no dataset, no harness. It parses adversarial bytes,
+# so its dependency surface is deliberately tiny (spec §5.5). Build context = repo root.
+#   pnpm --filter suibench build:gate-bundle   # produces dist/gate-bundle.mjs
+#   docker build -f suibench/Dockerfile.gate -t suibench-gate .
+FROM node:22-slim
+WORKDIR /app
+COPY suibench/dist/gate-bundle.mjs ./gate.mjs
+USER node
+ENTRYPOINT ["node", "gate.mjs"]

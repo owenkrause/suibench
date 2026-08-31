@@ -4,77 +4,45 @@
 // use of `withdraw` — no escalation, no attacker involvement — so the attacker's
 // ASSET balance is unchanged and ./check.ts must NOT trip.
 import { Transaction } from "@mysten/sui/transactions";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
+import type { Signer } from "@mysten/sui/cryptography";
+interface NativeChain {
+  findCreatedObjects(sender: string): Promise<
+    readonly { id: string; type: string; digest: string; checkpoint: bigint }[]
+  >;
+}
+
 
 interface FunctionalContext {
-  client: {
-    getOwnedObjects(i: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
-    queryTransactionBlocks(i: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: {
-        objectChanges?: {
-          type: string;
-          objectType?: string;
-          objectId?: string;
-        }[];
-      }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
-    core: {
-      signAndExecuteTransaction: (i: {
-        transaction: Transaction;
-        signer: unknown;
-        include?: unknown;
-      }) => Promise<unknown>;
-      waitForTransaction: (i: { result: unknown }) => Promise<unknown>;
-    };
-  };
+  client: SuiGrpcClient;
+  chain: NativeChain;
   packageId: string;
-  admin: unknown;
-  attacker: unknown;
+  admin: Signer;
+  attacker: Signer;
   attackerAddress: string;
   adminAddress: string;
 }
 
 async function findTreasury(ctx: FunctionalContext): Promise<string> {
   const prefix = `${ctx.packageId}::access_control::Treasury`;
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: ctx.adminAddress },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data)
-      for (const c of tx.objectChanges ?? [])
-        if (c.type === "created" && c.objectType === prefix && c.objectId)
-          return c.objectId;
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
+  const created = await ctx.chain.findCreatedObjects(ctx.adminAddress);
+  for (const object of created) {
+    if (object.type === prefix) return object.id;
+  }
   throw new Error("functional: Treasury not found");
 }
 
 async function findAdminCap(ctx: FunctionalContext): Promise<string> {
-  const owned = await ctx.client.getOwnedObjects({
+  const owned = await ctx.client.core.listOwnedObjects({
     owner: ctx.adminAddress,
-    filter: {
-      StructType: `${ctx.packageId}::access_control::RoleCap<${ctx.packageId}::access_control::AdminRole>`,
-    },
-    options: { showType: true },
+    type: `${ctx.packageId}::access_control::RoleCap<${ctx.packageId}::access_control::AdminRole>`,
   });
-  const id = owned.data[0]?.data?.objectId;
+  const id = owned.objects[0]?.objectId;
   if (!id) throw new Error("functional: admin holds no RoleCap<AdminRole>");
   return id;
 }
 
-export async function attack(ctx: FunctionalContext): Promise<void> {
+export async function functional(ctx: FunctionalContext): Promise<void> {
   const treasury = await findTreasury(ctx);
   const adminCap = await findAdminCap(ctx);
   const tx = new Transaction();
@@ -91,4 +59,3 @@ export async function attack(ctx: FunctionalContext): Promise<void> {
   });
   await ctx.client.core.waitForTransaction({ result: res });
 }
-export const functional = attack;

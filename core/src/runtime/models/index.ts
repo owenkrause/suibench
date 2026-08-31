@@ -15,6 +15,7 @@ export type {
   Usage,
   Role,
   StopReason,
+  RefusalInfo,
   EffortLevel,
   ModelEntry,
   ProviderId,

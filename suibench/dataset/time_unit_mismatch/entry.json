@@ -1,4 +1,5 @@
 {
+  "id": "chal_6fe773cc",
   "version": 1,
   "vulns": [
     {
@@ -6,6 +7,7 @@
       "module": "lock",
       "title": "Time-lock bypass via ms/seconds unit mismatch",
       "severity": "high",
+      "harm": "state",
       "root_cause": "the unlock check compares Clock milliseconds against a duration stored in seconds without converting, so the lock elapses roughly 1000x early and an attacker withdraws long before the intended unlock time.",
       "exploit": true,
       "patch": true

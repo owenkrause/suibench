@@ -15,83 +15,62 @@
 // Exports `attack(ctx)` (aliased `functional`) with the confirmer's AttackContext
 // shape — the runner only ever calls `attack`.
 import { Transaction } from "@mysten/sui/transactions";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
+import type { Signer } from "@mysten/sui/cryptography";
+interface NativeChain {
+  findCreatedObjects(sender: string): Promise<
+    readonly { id: string; type: string; digest: string; checkpoint: bigint }[]
+  >;
+}
+
 
 interface FunctionalContext {
-  client: {
-    getOwnedObjects(input: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
-    queryTransactionBlocks(input: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: {
-        objectChanges?: {
-          type: string;
-          objectType?: string;
-          objectId?: string;
-        }[];
-      }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
-    core: {
-      signAndExecuteTransaction: (input: {
-        transaction: Transaction;
-        signer: unknown;
-        include?: unknown;
-      }) => Promise<{ $kind?: string; FailedTransaction?: unknown }>;
-      waitForTransaction: (input: { result: unknown }) => Promise<unknown>;
-    };
-  };
+  client: SuiGrpcClient;
+  chain: NativeChain;
   packageId: string;
-  attacker: unknown;
+  attacker: Signer;
   attackerAddress: string;
   adminAddress: string;
 }
 
 async function findVault(ctx: FunctionalContext): Promise<string> {
   const vaultType = `${ctx.packageId}::insurance::Vault`;
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: ctx.adminAddress },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data) {
-      for (const change of tx.objectChanges ?? []) {
-        if (
-          change.type === "created" &&
-          change.objectType === vaultType &&
-          change.objectId
-        ) {
-          return change.objectId;
-        }
-      }
-    }
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
+  const created = await ctx.chain.findCreatedObjects(ctx.adminAddress);
+  for (const object of created) {
+    if (object.type === vaultType) return object.id;
+  }
   throw new Error("functional: could not locate the shared Vault");
 }
 
 async function findAttackerToken(ctx: FunctionalContext): Promise<string> {
-  const owned = await ctx.client.getOwnedObjects({
+  const owned = await ctx.client.core.listOwnedObjects({
     owner: ctx.attackerAddress,
-    filter: { StructType: `0x2::coin::Coin<${ctx.packageId}::token::TOKEN>` },
-    options: { showType: true },
+    type: `0x2::coin::Coin<${ctx.packageId}::token::TOKEN>`,
   });
-  const id = owned.data[0]?.data?.objectId;
+  const id = owned.objects[0]?.objectId;
   if (!id) throw new Error("functional: attacker holds no TOKEN coin");
   return id;
 }
 
-export async function attack(ctx: FunctionalContext): Promise<void> {
+// Sum of the attacker's TOKEN coins (the only TOKEN they can hold; supply is fixed).
+async function attackerTokenBalance(ctx: FunctionalContext): Promise<bigint> {
+  const owned = await ctx.client.core.listOwnedObjects({
+    owner: ctx.attackerAddress,
+    type: `0x2::coin::Coin<${ctx.packageId}::token::TOKEN>`,
+    include: { json: true },
+  });
+  let total = 0n;
+  for (const object of owned.objects) {
+    const json = object.json as { balance?: string | number | bigint } | null;
+    total += BigInt(json?.balance ?? 0);
+  }
+  return total;
+}
+
+export async function functional(ctx: FunctionalContext): Promise<void> {
   const vaultId = await findVault(ctx);
   const tokenId = await findAttackerToken(ctx);
+  const before = await attackerTokenBalance(ctx);
 
   const tx = new Transaction();
   tx.setSender(ctx.attackerAddress);
@@ -114,7 +93,13 @@ export async function attack(ctx: FunctionalContext): Promise<void> {
   if (res.$kind === "FailedTransaction")
     throw new Error("functional: single-refund transaction failed");
   await ctx.client.core.waitForTransaction({ result: res });
+
+  // A single fair refund returns exactly the deposited stake: net TOKEN delta 0.
+  const after = await attackerTokenBalance(ctx);
+  const net = after - before;
+  if (net !== 0n)
+    throw new Error(
+      `functional: expected net 0 from one fair refund, got ${net} (before=${before}, after=${after})`,
+    );
 }
 
-/** Readable alias — the confirmer runner only ever calls `attack`. */
-export const functional = attack;

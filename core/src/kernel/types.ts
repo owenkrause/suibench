@@ -3,8 +3,6 @@
 
 export type Severity = "critical" | "high" | "medium" | "low";
 
-export type Network = "devnet" | "mainnet" | "none";
-
 /** Committed-state theft vs. denial of a legitimate op. */
 export type Harm = "state" | "availability";
 
@@ -37,7 +35,6 @@ export interface ToolMenu {
 }
 
 export interface RunEnv {
-  network: Network;
   model: string;
   effort: string;
 }
@@ -83,10 +80,38 @@ export interface BalanceSet {
   byAddress: Record<string, Record<string, bigint>>;
 }
 
+/**
+ * How an object is owned — a faithful copy of the SDK's RPC `ObjectOwner` union
+ * (the kernel stays SDK-free, so we mirror the shape rather than import it). This
+ * is what lets a check distinguish a SHARED object from an immutable or
+ * address-owned one, which `owner: string | null` could not.
+ */
+export type ObjectOwner =
+  | { AddressOwner: string }
+  | { ObjectOwner: string }
+  | { Shared: { initial_shared_version: string } }
+  | "Immutable"
+  | { ConsensusAddressOwner: { start_version: string; owner: string } };
+
+/** The owning ADDRESS if the object is address- or consensus-address-owned (or
+ *  owned by another object), else null (shared / immutable). */
+export function ownerAddress(owner: ObjectOwner): string | null {
+  if (owner === "Immutable") return null;
+  if ("AddressOwner" in owner) return owner.AddressOwner;
+  if ("ObjectOwner" in owner) return owner.ObjectOwner;
+  if ("ConsensusAddressOwner" in owner) return owner.ConsensusAddressOwner.owner;
+  return null; // Shared
+}
+
+/** True iff the object is a shared object (consensus-sequenced, no single owner). */
+export function isShared(owner: ObjectOwner): boolean {
+  return typeof owner === "object" && "Shared" in owner;
+}
+
 /** One committed object: its owner, Move type, and parsed Move fields. */
 export interface ObjectState {
-  /** owning address, or null for shared/immutable. */
-  owner: string | null;
+  /** how the object is owned (address / object / shared / immutable). */
+  owner: ObjectOwner;
   /** fully-qualified Move struct type, e.g. `0xpkg::reward_pool::ShareToken`. */
   type: string;
   /** parsed Move fields (numbers arrive as strings, matching the RPC shape). */
@@ -94,18 +119,14 @@ export interface ObjectState {
 }
 
 /**
- * The objects the grader can see. `ownerOf` is the fast owner lookup; `byId`
+ * The objects the grader can see. `ownerOf` is the fast owner-address lookup; `byId`
  * carries the full parsed state so a check can read a victim object's field
  * (e.g. `ShareToken.shares`) with no live client. `ownerOf[id]` always mirrors
- * `byId[id].owner`.
+ * `ownerAddress(byId[id].owner)` (null for a shared/immutable object).
  */
 export interface ObjectSet {
   ownerOf: Record<string, string | null>;
   byId: Record<string, ObjectState>;
-}
-
-export interface EventLog {
-  events: { type: string; sender: string; data: unknown }[];
 }
 
 /** How a legitimate victim op V fared after the attack committed. */
@@ -129,7 +150,6 @@ export interface VictimOutcome {
 export interface ChainSnapshot {
   readonly balances: BalanceSet;
   readonly objects: ObjectSet;
-  readonly events: EventLog;
   /** Availability-tier only: the folded victim-op outcome (undefined otherwise).
    *  Lives on POST so a check reads it off `delta.post.victim`. */
   readonly victim?: VictimOutcome;
@@ -144,60 +164,31 @@ export interface ChainDelta {
   readonly post: ChainSnapshot;
 }
 
-// --- Verdict -----------------------------------------------------------------
-
-/**
- * The result of grading one exploit. `confirmed` REQUIRES both the exploit and
- * a `ChainSnapshot` proof — a confirmed verdict with no evidence is a compile
- * error, which is the entire point of this module.
- */
-export type Verdict =
-  | { kind: "confirmed"; exploit: Exploit; proof: ChainSnapshot }
-  | { kind: "refuted"; exploit: Exploit; reason: string }
-  | { kind: "false_positive"; reason: string };
-
 // --- Deterministic counterfactual attribution --------------------------------
 
 /**
  * Which labeled bug(s) an exploit provably depended on, decided by patch
- * counterfactuals (exploit works on the vulnerable build ∧ breaks under a
- * label's patch) — no LLM on this axis.
+ * counterfactuals: a label the exploit witnessed on the vulnerable build,
+ * whose own patch no longer witnesses it — no LLM on this axis.
  */
+export type ExploitAttribution =
+  | { readonly kind: "refuted"; readonly labels: readonly [] }
+  | {
+      readonly kind: "attributed";
+      readonly labels: readonly [string, ...string[]];
+    }
+  | { readonly kind: "unattributed"; readonly labels: readonly [] };
+
 export interface Attribution {
-  /**
-   * exploit id -> attributed label ids. The SOLE source of truth for
-   * confirmed-tier scoring: an EMPTY entry is a false positive (unions
-   * base=false with base=true-but-patch-invariant). Attributed / exploit-carrying
-   * / false-positive counts all derive from here.
-   */
-  perExploit: Record<string, string[]>;
+  /** Exploit id -> explicit base/check and label-attribution state. */
+  readonly perExploit: Readonly<Record<string, ExploitAttribution>>;
   /** Union of attributed labels over confirmed exploits (recall numerator). */
-  confirmedLabels: string[];
+  readonly confirmedLabels: readonly string[];
 }
-
-// --- Actions the hunter can take ---------------------------------------------
-
-export type Action =
-  | { kind: "run_bash"; command: string }
-  | { kind: "write_file"; file: MoveFile }
-  | { kind: "read_reference"; name: string }
-  | { kind: "report_exploit"; exploit: Exploit };
 
 // --- Smart constructors ------------------------------------------------------
 
 /** The sole minter of a `SanitizedSource`. */
 export function sanitize(files: MoveFile[]): SanitizedSource {
   return { files } as SanitizedSource;
-}
-
-export function confirmed(exploit: Exploit, proof: ChainSnapshot): Verdict {
-  return { kind: "confirmed", exploit, proof };
-}
-
-export function refuted(exploit: Exploit, reason: string): Verdict {
-  return { kind: "refuted", exploit, reason };
-}
-
-export function falsePositive(reason: string): Verdict {
-  return { kind: "false_positive", reason };
 }

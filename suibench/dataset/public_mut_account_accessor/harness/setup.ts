@@ -6,33 +6,18 @@
 // collateral. The ATTACKER holds no ASSET (pre-snapshot), so their post-attack
 // ASSET balance is exactly the collateral drained out of the victim's account.
 import { Transaction } from "@mysten/sui/transactions";
-import type { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
 import type { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 
 const VICTIM_DEPOSIT = 1_000n;
 
+interface CreatedObject {
+  readonly id: string;
+  readonly type: string;
+}
+
 interface SetupContext {
-  client: SuiJsonRpcClient & {
-    getOwnedObjects(input: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
-    queryTransactionBlocks(i: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: {
-        objectChanges?: {
-          type: string;
-          objectType?: string;
-          objectId?: string;
-        }[];
-      }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
+  client: SuiGrpcClient & {
     core: {
       signAndExecuteTransaction: (i: {
         transaction: Transaction;
@@ -41,6 +26,9 @@ interface SetupContext {
       }) => Promise<{ $kind?: string }>;
       waitForTransaction: (i: { result: unknown }) => Promise<unknown>;
     };
+  };
+  chain: {
+    findCreatedObjects(sender: string): Promise<readonly CreatedObject[]>;
   };
   packageId: string;
   attacker: Ed25519Keypair;
@@ -53,21 +41,10 @@ interface SetupContext {
 
 async function findMarketMaker(ctx: SetupContext): Promise<string> {
   const mmType = `${ctx.packageId}::market_maker::MarketMaker`;
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: ctx.adminAddress },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data) {
-      for (const c of tx.objectChanges ?? []) {
-        if (c.type === "created" && c.objectType === mmType && c.objectId)
-          return c.objectId;
-      }
-    }
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
+  const marketMaker = (
+    await ctx.chain.findCreatedObjects(ctx.adminAddress)
+  ).find((object) => object.type === mmType);
+  if (marketMaker) return marketMaker.id;
   throw new Error("setup: MarketMaker not found");
 }
 
@@ -75,12 +52,12 @@ async function findAssetCoin(
   ctx: SetupContext,
   owner: string,
 ): Promise<string> {
-  const owned = await ctx.client.getOwnedObjects({
+  const { objects } = await ctx.client.core.listOwnedObjects({
     owner,
-    filter: { StructType: `0x2::coin::Coin<${ctx.packageId}::asset::ASSET>` },
-    options: { showType: true },
+    type: `0x2::coin::Coin<${ctx.packageId}::asset::ASSET>`,
+    include: { json: true },
   });
-  const id = owned.data[0]?.data?.objectId;
+  const id = objects[0]?.objectId;
   if (!id) throw new Error(`setup: ${owner} holds no ASSET coin`);
   return id;
 }

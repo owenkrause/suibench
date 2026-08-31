@@ -18,8 +18,10 @@ function run(m: Partial<ScoreMetrics>): RunScore {
       findings_total: 0,
       true_positives: 0,
       false_positives: 0,
+      unattributed_findings: 0,
       recall: null,
       precision: null,
+      attribution_rate: null,
       severity_accuracy: null,
       severity_correct: 0,
       severity_total: 0,
@@ -63,12 +65,61 @@ describe("aggregateCorpus — micro vs macro", () => {
 
   it("micro precision pools findings; macro precision averages entry precision", () => {
     const entries = [
-      entry("A", { findings_total: 4, true_positives: 1, precision: 0.25 }),
+      entry("A", {
+        findings_total: 4,
+        true_positives: 1,
+        false_positives: 3,
+        precision: 0.25,
+      }),
       entry("B", { findings_total: 1, true_positives: 1, precision: 1 }),
     ];
     const c = aggregateCorpus(entries);
     expect(c.micro.precision).toBeCloseTo(2 / 5, 10); // pooled TPs/findings
     expect(c.macro.precision).toBeCloseTo((0.25 + 1) / 2, 10);
+  });
+
+  it("micro precision excludes unattributed findings from its denominator", () => {
+    const entries = [
+      entry("confirmed", {
+        tier: "confirmed",
+        findings_total: 10,
+        true_positives: 1,
+        false_positives: 1,
+        unattributed_findings: 8,
+        precision: 0.5,
+        attribution_rate: 1 / 9,
+      }),
+    ];
+
+    const c = aggregateCorpus(entries);
+    expect(c.micro.findings_total).toBe(10);
+    expect(c.micro.precision).toBe(0.5);
+  });
+
+  it("micro attribution rate pools confirmed entries and excludes detect TPs", () => {
+    const entries = [
+      entry("detect", {
+        tier: "detect",
+        findings_total: 10,
+        true_positives: 10,
+        precision: 1,
+        attribution_rate: null,
+      }),
+      entry("confirmed", {
+        tier: "confirmed",
+        findings_total: 4,
+        true_positives: 1,
+        false_positives: 1,
+        unattributed_findings: 2,
+        precision: 0.5,
+        attribution_rate: 1 / 3,
+      }),
+    ];
+
+    const c = aggregateCorpus(entries);
+    expect(c.micro.attribution_rate).toBeCloseTo(1 / 3);
+    expect(c.macro.attribution_rate).toBeCloseTo(1 / 3);
+    expect(c.micro.unattributed_findings).toBe(2);
   });
 
   it("null rates are skipped in the macro mean (not counted as 0)", () => {

@@ -3,29 +3,20 @@
 // effort, print the CorpusScore.
 //
 //   suibench --dataset ./dataset --axis exploitation --model claude-opus-4-8
-//   suibench --scripted  ./scripted.json   # runnable WITHOUT a model/Docker
-//   suibench --replay    ./trajectories/   # replay recorded runs
-//
-// The `--scripted`/`--replay` paths need neither an API key nor (for scripted
-// comprehension) Docker, so the driver is exercisable offline.
-import {
-  readFileSync,
-  readdirSync,
-  existsSync,
-  statSync,
-  realpathSync,
-} from "node:fs";
+import { readdirSync, existsSync, statSync, realpathSync } from "node:fs";
 import { resolve, join, basename } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Action, JudgeFn, RunEnv, Trajectory } from "core";
+import type { JudgeFn, RunEnv } from "core";
 import {
   AgentError,
+  FileTrajectorySink,
   getModelClient,
   resolveModel,
   type EffortLevel,
   type ModelClient,
 } from "core/runtime";
-import { SandboxManager, AUDIT_IMAGE } from "../adapters/sandbox.js";
+import { SandboxManager } from "../adapters/sandbox.js";
+import { UNTRUSTED_IMAGE, CONFIRMER_IMAGE, GATE_IMAGE } from "../adapters/images.js";
 import { Confirmer } from "../adapters/confirmer.js";
 import { makeJudge } from "../adapters/judge.js";
 import { loadEntry } from "../dataset/index.js";
@@ -37,12 +28,7 @@ import {
   type BenchDeps,
   type RunConfig,
 } from "./driver.js";
-import {
-  auditorPolicyFactory,
-  scriptedPolicyFactory,
-  replayPolicyFactory,
-  patchPolicyFactory,
-} from "./policies.js";
+import { auditorRunFactory, patchRunFactory } from "./policies.js";
 import { benchPatch } from "./patch-driver.js";
 import { benchPerturb } from "./perturb-driver.js";
 import { perturbationManifest } from "../adapters/manifest.js";
@@ -58,8 +44,6 @@ export interface Args {
   judgeModel: string;
   effort: EffortLevel;
   k: number;
-  scripted?: string;
-  replay?: string;
   concurrency: number;
   maxTurns: number;
   output: string;
@@ -76,8 +60,6 @@ const VALUE_FLAGS = new Set([
   "--judge-model",
   "--effort",
   "--k",
-  "--scripted",
-  "--replay",
   "--concurrency",
   "--max-turns",
   "--output",
@@ -142,18 +124,6 @@ export function parseArgs(argv: string[]): Args {
     );
   }
 
-  const scripted = get("--scripted");
-  const replay = get("--replay");
-  if (scripted && replay) throw new Error("--scripted and --replay are mutually exclusive");
-  if (axis === "patch" && (scripted || replay)) {
-    throw new Error("--scripted/--replay are not supported for patch mode");
-  }
-  if (axis === "exploitation" && harness === "static") {
-    throw new Error(
-      "static + exploitation is invalid: use --axis comprehension or --harness harnessed",
-    );
-  }
-
   return {
     dataset: get("--dataset") ?? resolve(import.meta.dirname, "../../dataset"),
     filter: get("--filter"),
@@ -163,8 +133,6 @@ export function parseArgs(argv: string[]): Args {
     judgeModel,
     effort,
     k: positiveInteger(get("--k") ?? "1", "--k"),
-    scripted,
-    replay,
     concurrency: positiveInteger(get("--concurrency") ?? "3", "--concurrency"),
     maxTurns: positiveInteger(get("--max-turns") ?? "60", "--max-turns"),
     output: get("--output") ?? `.suibench/${timestamp()}`,
@@ -185,23 +153,6 @@ function discoverEntries(datasetDir: string, filter?: string): string[] {
     )
     .filter((dir) => !filter || basename(dir).includes(filter))
     .sort((a, b) => basename(a).localeCompare(basename(b)));
-}
-
-function loadScripted(path: string): Record<string, Action[]> {
-  return JSON.parse(readFileSync(resolve(path), "utf-8"));
-}
-
-function loadReplay(path: string): Record<string, Trajectory> {
-  const p = resolve(path);
-  if (statSync(p).isFile())
-    return JSON.parse(readFileSync(p, "utf-8"));
-  const out: Record<string, Trajectory> = {};
-  for (const name of readdirSync(p)) {
-    if (!name.endsWith(".json")) continue;
-    const t = JSON.parse(readFileSync(join(p, name), "utf-8")) as Trajectory;
-    out[t.target] = t;
-  }
-  return out;
 }
 
 export function lazyJudge(
@@ -233,10 +184,6 @@ export async function main(): Promise<void> {
   }
 
   const env: RunEnv = {
-    network:
-      args.axis === "exploitation" || args.axis === "patch"
-        ? "devnet"
-        : "none",
     model: args.model,
     effort: args.effort,
   };
@@ -251,10 +198,9 @@ export async function main(): Promise<void> {
   );
 
   const manager = new SandboxManager();
-  const deps: BenchDeps = { policyFor: () => ({ act: async () => ({ kind: "run_bash", command: ":" }) }) };
-
-  const manifest = await captureManifest(AUDIT_IMAGE);
+  const manifest = await captureManifest({ untrusted: UNTRUSTED_IMAGE, confirmer: CONFIRMER_IMAGE, gate: GATE_IMAGE });
   const collector = new CostCollector();
+  const sink = new FileTrajectorySink(join(args.output, "trajectories"));
   const runDirConfig: RunDirConfig = {
     axis: args.axis,
     harness: args.harness,
@@ -266,9 +212,8 @@ export async function main(): Promise<void> {
     effort: args.effort,
     dataset: resolve(args.dataset),
     filter: args.filter ?? null,
-    policy: args.scripted ? "scripted" : args.replay ? "replay" : "live",
     requestedTargets: entryDirs.map((dir) => basename(dir)),
-    image: AUDIT_IMAGE,
+    images: { untrusted: UNTRUSTED_IMAGE, confirmer: CONFIRMER_IMAGE, gate: GATE_IMAGE },
   };
 
   // Perturb mode: score originals + regenerated twins, report the recall gap.
@@ -281,7 +226,7 @@ export async function main(): Promise<void> {
     }
     const twinDumpDir = join(args.output, "twins");
     const perturbDeps: BenchDeps = {
-      policyFor: auditorPolicyFactory({
+      runFor: auditorRunFactory({
         manager,
         model: args.model,
         effort: args.effort,
@@ -289,6 +234,8 @@ export async function main(): Promise<void> {
       }),
       graderFor: (entry) => new Confirmer(manager, entry.harness),
       concurrency: args.concurrency,
+      onEntryCost: (target, cost) => collector.record(target, cost),
+      sink,
     };
     try {
       const perturbation = await benchPerturb(entryDirs, config, perturbDeps, {
@@ -298,13 +245,13 @@ export async function main(): Promise<void> {
       });
       const report: RunReport<CorpusScore> = {
         score: {
-          complete: true,
-          scored: perturbation.perEntry.length,
-          errored: 0,
+          complete: perturbation.complete,
+          scored: perturbation.scored,
+          errored: perturbation.errored,
           micro: {} as CorpusScore["micro"],
           macro: {} as CorpusScore["macro"],
           entries: [],
-          erroredEntries: [],
+          erroredEntries: perturbation.erroredEntries,
         },
         cost: collector.corpusCost(),
         manifest: { ...manifest, perturbation: perturbationManifest(args.twinsPerEntry) },
@@ -313,6 +260,16 @@ export async function main(): Promise<void> {
       writeRunReport(args.output, report, runDirConfig);
       console.log(JSON.stringify(perturbation, bigintReplacer, 2));
       console.error(`\n[perturb] macro_gap=${perturbation.macro_gap} — twins + perturbation.json under ${args.output}`);
+      if (!perturbation.complete) {
+        const names = perturbation.erroredEntries.map((entry) => entry.target).join(", ");
+        console.error(
+          `\n[perturb] INCOMPLETE — ${perturbation.scored}/${perturbation.scored + perturbation.errored} scored, ${perturbation.errored} errored: ${names}`,
+        );
+        console.error(
+          `        aggregate reflects SCORED entries only; rerun errored before trusting it`,
+        );
+        process.exitCode = 2;
+      }
     } finally {
       await manager.teardownAll();
     }
@@ -324,7 +281,7 @@ export async function main(): Promise<void> {
     try {
       const score = await benchPatch(entryDirs, env, args.k, args.harness, {
         manager,
-        patchFor: patchPolicyFactory({
+        patchFor: patchRunFactory({
           manager,
           model: args.model,
           effort: args.effort,
@@ -332,6 +289,7 @@ export async function main(): Promise<void> {
         }),
         concurrency: args.concurrency,
         onEntryCost: (target, cost) => collector.record(target, cost),
+        sink,
       });
       const report: RunReport<typeof score> = { score, cost: collector.corpusCost(), manifest };
       writeRunReport(args.output, report, runDirConfig);
@@ -350,19 +308,17 @@ export async function main(): Promise<void> {
     return;
   }
 
-  // Policy selection: scripted/replay run without a model.
-  if (args.scripted) {
-    deps.policyFor = scriptedPolicyFactory(loadScripted(args.scripted));
-  } else if (args.replay) {
-    deps.policyFor = replayPolicyFactory(loadReplay(args.replay));
-  } else {
-    deps.policyFor = auditorPolicyFactory({
+  const deps: BenchDeps = {
+    runFor: auditorRunFactory({
       manager,
       model: args.model,
       effort: args.effort,
       maxTurns: args.maxTurns,
-    });
-  }
+    }),
+    concurrency: args.concurrency,
+    onEntryCost: (target, cost) => collector.record(target, cost),
+    sink,
+  };
 
   // Axis grader: exploitation needs the Confirmer; comprehension needs a judge.
   // The Confirmer is built per-entry so it carries that entry's setup/victim
@@ -370,13 +326,9 @@ export async function main(): Promise<void> {
   if (args.axis === "exploitation") {
     deps.graderFor = (entry) => new Confirmer(manager, entry.harness);
   } else {
-    // Construct the judge client only if a finding actually needs matching. This
-    // keeps an empty scripted comprehension smoke test fully offline.
+    // Construct the judge client only if a finding actually needs matching.
     deps.judge = lazyJudge(args.judgeModel);
   }
-
-  deps.concurrency = args.concurrency;
-  deps.onEntryCost = (target, cost) => collector.record(target, cost);
 
   try {
     const score = await bench(entryDirs, config, deps);

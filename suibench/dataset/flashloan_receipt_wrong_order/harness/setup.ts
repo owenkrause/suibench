@@ -2,25 +2,11 @@
 // their OWN order A funded with 10 ASSET (and keeps ~10 spare). The exploit will
 // flash-borrow from V and repay into A.
 import { Transaction } from "@mysten/sui/transactions";
-import type { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
 import type { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 
 interface SetupContext {
-  client: SuiJsonRpcClient & {
-    getOwnedObjects(i: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
-    core: {
-      signAndExecuteTransaction: (i: {
-        transaction: Transaction;
-        signer: unknown;
-        include?: unknown;
-      }) => Promise<{ $kind?: string }>;
-      waitForTransaction: (i: { result: unknown }) => Promise<unknown>;
-    };
-  };
+  client: SuiGrpcClient;
   packageId: string;
   admin: Ed25519Keypair;
   attacker: Ed25519Keypair;
@@ -28,19 +14,19 @@ interface SetupContext {
   attackerAddress: string;
 }
 async function coinOf(ctx: SetupContext, owner: string): Promise<string> {
-  const owned = await ctx.client.getOwnedObjects({
+  const { objects } = await ctx.client.core.listOwnedObjects({
     owner,
-    filter: { StructType: `0x2::coin::Coin<${ctx.packageId}::asset::ASSET>` },
-    options: { showType: true },
+    type: `0x2::coin::Coin<${ctx.packageId}::asset::ASSET>`,
+    include: { json: true },
   });
-  const id = owned.data[0]?.data?.objectId;
+  const id = objects[0]?.objectId;
   if (!id) throw new Error(`setup: ${owner} holds no ASSET`);
   return id;
 }
 async function send(
   ctx: SetupContext,
   tx: Transaction,
-  signer: unknown,
+  signer: Ed25519Keypair,
   label: string,
 ) {
   const res = await ctx.client.core.signAndExecuteTransaction({

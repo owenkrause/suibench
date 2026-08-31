@@ -7,7 +7,7 @@ use challenge::asset::ASSET;
 
 const MIN_STAKE_HOURS: u64 = 168;
 const MIN_CLAIM_AMOUNT: u64 = 1000;
-const MILLISECONDS_PER_HOUR: u64 = 1000;
+const MILLISECONDS_PER_HOUR: u64 = 3_600_000;
 /// Loyalty reward paid on claim: 1/REWARD_DIVISOR of the staked amount.
 const REWARD_DIVISOR: u64 = 10;
 

@@ -16,11 +16,14 @@ module challenge::storage {
     }
 
     public fun open(coin: Coin<TOKEN>, ctx: &mut TxContext) {
+        let user = tx_context::sender(ctx);
+        let amount = coin::value(&coin);
         let storage = Storage {
             id: object::new(ctx),
             reserve: coin::into_balance(coin),
             supply: table::new<address, u64>(ctx)
         };
+        add_supply(&mut storage, user, amount);
         transfer::share_object(storage);
     }
 

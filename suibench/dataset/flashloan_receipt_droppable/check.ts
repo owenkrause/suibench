@@ -6,9 +6,12 @@
 // attacker starts with 0 ASSET (the pool is seeded only from the admin's fixed
 // supply, minted only at init), so their post-attack ASSET balance is exactly
 // the drained amount. A benign flash loan (borrow + repay same tx) nets ~0.
-import { type Check, balanceGained } from "core";
+import { type Check, type CheckResult, balanceGained } from "core";
 
-export const check: Check = (delta, params) => {
+const LABEL_ID = "receipt-droppable" as const;
+
+export const check: Check = (delta, params): CheckResult => {
   const ASSET = `${params.packageId}::asset::ASSET`;
-  return balanceGained(delta, params.attackerAddress, ASSET) >= 500n;
+  const witnessed = balanceGained(delta, params.attackerAddress, ASSET) >= 500n;
+  return { witnesses: witnessed ? [LABEL_ID] : [] };
 };

@@ -11,9 +11,9 @@ function scratchEntry(): string {
   mkdirSync(join(d, "sources"), { recursive: true });
   mkdirSync(join(d, "exploits"), { recursive: true });
   writeFileSync(join(d, "Move.toml"), `[package]\nname="challenge"\n`);
-  writeFileSync(join(d, "entry.json"), JSON.stringify({ version: 1, vulns: [{ id: "admincap-leak", module: "vault", title: "t", severity: "critical", root_cause: "r" }] }));
+  writeFileSync(join(d, "entry.json"), JSON.stringify({ id: "chal_00000003", version: 1, vulns: [{ id: "admincap-leak", module: "vault", title: "t", severity: "critical", harm: "state", root_cause: "r" }] }));
   writeFileSync(join(d, "sources/vault.move"), `module challenge::vault {\n  public fun request_admin_status() {}\n}\n`);
-  writeFileSync(join(d, "check.ts"), `import { type Check } from "core";\nexport const check: Check = () => true;\n`);
+  writeFileSync(join(d, "check.ts"), `import { type Check, type CheckResult } from "core";\nconst LABEL_ID = "admincap-leak" as const;\nexport const check: Check = (): CheckResult => ({ witnesses: [LABEL_ID] });\n`);
   writeFileSync(join(d, "exploits/admincap-leak.ts"), `export async function attack() {}\n`);
   return d;
 }

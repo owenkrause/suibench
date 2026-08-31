@@ -18,28 +18,15 @@
 // readability at the call site; the runner only ever calls `attack`.
 import { Transaction } from "@mysten/sui/transactions";
 
+interface CreatedObject {
+  readonly id: string;
+  readonly type: string;
+  readonly digest: string;
+  readonly checkpoint: bigint;
+}
+
 interface FunctionalContext {
   client: {
-    getOwnedObjects(input: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
-    queryTransactionBlocks(input: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: {
-        objectChanges?: {
-          type: string;
-          objectType?: string;
-          objectId?: string;
-        }[];
-      }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
     core: {
       signAndExecuteTransaction: (input: {
         transaction: Transaction;
@@ -47,7 +34,17 @@ interface FunctionalContext {
         include?: unknown;
       }) => Promise<{ $kind?: string; FailedTransaction?: unknown }>;
       waitForTransaction: (input: { result: unknown }) => Promise<unknown>;
+      listOwnedObjects(input: {
+        owner: string;
+        type?: string;
+        include?: { json?: boolean };
+      }): Promise<{
+        objects: { objectId: string; type: string; json?: unknown }[];
+      }>;
     };
+  };
+  chain: {
+    findCreatedObjects(sender: string): Promise<readonly CreatedObject[]>;
   };
   packageId: string;
   admin: unknown;
@@ -58,12 +55,12 @@ const DEPOSIT_MIST = 1_000_000_000n; // ~1 SUI
 
 async function findAdminCap(ctx: FunctionalContext): Promise<string> {
   const capType = `${ctx.packageId}::vault::AdminCap`;
-  const owned = await ctx.client.getOwnedObjects({
+  const { objects } = await ctx.client.core.listOwnedObjects({
     owner: ctx.adminAddress,
-    filter: { StructType: capType },
-    options: { showType: true },
+    type: capType,
+    include: { json: true },
   });
-  const id = owned.data[0]?.data?.objectId;
+  const id = objects[0]?.objectId;
   if (!id) throw new Error("functional: admin does not hold the init AdminCap");
   return id;
 }
@@ -72,26 +69,10 @@ async function findAdminCap(ctx: FunctionalContext): Promise<string> {
 // scan the admin's publish transaction's object changes for the created Vault.
 async function findVault(ctx: FunctionalContext): Promise<string> {
   const vaultType = `${ctx.packageId}::vault::Vault`;
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: ctx.adminAddress },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data) {
-      for (const change of tx.objectChanges ?? []) {
-        if (
-          change.type === "created" &&
-          change.objectType === vaultType &&
-          change.objectId
-        ) {
-          return change.objectId;
-        }
-      }
-    }
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
+  const vault = (await ctx.chain.findCreatedObjects(ctx.adminAddress)).find(
+    (object) => object.type === vaultType,
+  );
+  if (vault) return vault.id;
   throw new Error("functional: could not locate the shared Vault");
 }
 
@@ -111,7 +92,7 @@ async function send(
   await ctx.client.core.waitForTransaction({ result: res });
 }
 
-export async function attack(ctx: FunctionalContext): Promise<void> {
+export async function functional(ctx: FunctionalContext): Promise<void> {
   const capId = await findAdminCap(ctx);
   const vaultId = await findVault(ctx);
 
@@ -141,5 +122,3 @@ export async function attack(ctx: FunctionalContext): Promise<void> {
   await send(ctx, wdTx, "withdraw");
 }
 
-/** Readable alias — the confirmer runner only ever calls `attack`. */
-export const functional = attack;

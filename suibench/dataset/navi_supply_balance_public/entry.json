@@ -1,4 +1,5 @@
 {
+  "id": "chal_ee10617f",
   "version": 1,
   "vulns": [
     {
@@ -6,6 +7,7 @@
       "module": "storage",
       "title": "increase_supply_balance is public, letting anyone inflate their supply balance and withdraw against it",
       "severity": "critical",
+      "harm": "state",
       "root_cause": "storage::increase_supply_balance is declared `public fun` and performs no authorization or deposit — it simply credits the caller's recorded supply balance (`supply[sender]`) by an arbitrary `amount`. Because Storage is a shared object, any account can call it directly from a PTB to inflate its own recorded supply for free, without ever transferring any TOKEN into the reserve. The legitimate `withdraw` path pays out real reserve coins up to the caller's recorded supply balance (`assert!(supply[sender] >= amount)` then `coin::take(&mut storage.reserve, amount, ctx)`), so an attacker can inflate its supply record via `increase_supply_balance` and then `withdraw` an equal amount of TOKEN out of a reserve it never funded, draining the pool. This is an internal accounting mutator left with `public` visibility. The fix is to make it internal (`public(friend)` / an authorized-only path) so it can never be invoked from an external transaction; the deposit-backed `deposit` + `withdraw` path is unaffected.",
       "exploit": true,
       "patch": true

@@ -5,9 +5,12 @@
 // A. The victim's order is drained and the attacker gains ~+1010 ASSET. Supply
 // is fixed and the attacker was only staked ~20, so a gain >= 500 means they
 // siphoned V's funds.
-import { type Check, balanceGained } from "core";
+import { type Check, type CheckResult, balanceGained } from "core";
 
-export const check: Check = (delta, params) => {
+const LABEL_ID = "receipt-wrong-order" as const;
+
+export const check: Check = (delta, params): CheckResult => {
   const ASSET = `${params.packageId}::asset::ASSET`;
-  return balanceGained(delta, params.attackerAddress, ASSET) >= 500n;
+  const witnessed = balanceGained(delta, params.attackerAddress, ASSET) >= 500n;
+  return { witnesses: witnessed ? [LABEL_ID] : [] };
 };

@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "dataset"
+  },
+  "references": [{ "path": "../core" }],
+  "include": ["dataset/*/check.ts"],
+  "exclude": ["node_modules", "dist"]
+}

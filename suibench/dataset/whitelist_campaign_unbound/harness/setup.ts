@@ -1,7 +1,7 @@
 // Setup for whitelist_campaign_unbound.
 //
 // Two independent gated sales, each a shared Campaign with its own shared
-// Whitelist (the Whitelist records the campaign_id it was made for):
+// Whitelist (the Whitelist records both its campaign_id and its creating admin):
 //
 //   Campaign A  — the GATED sale, created by ADMIN. Whitelist_A lists the USER
 //                 (a legitimate member) but NOT the attacker.
@@ -13,40 +13,20 @@
 // role) so they can pay real SUI into `invest`. `create_campaign` records
 // `admin = ctx.sender()`, so campaign A is the one whose `admin == adminAddress`
 // and campaign B the one whose `admin == attackerAddress` — that is how check.ts
-// tells the two apart. Each whitelist records `campaign_id`, so whitelist A is the
-// one whose `campaign_id == id(campaignA)`.
+// tells the two apart. Each whitelist records `campaign_id` and `admin`, so
+// whitelist A is the admin-owned list whose `campaign_id == id(campaignA)`.
 import { Transaction } from "@mysten/sui/transactions";
-import type { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
 import type { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
-
-interface ObjectChange {
-  type: string;
-  objectType?: string;
-  objectId?: string;
+interface NativeChain {
+  findCreatedObjects(sender: string): Promise<
+    readonly { id: string; type: string; digest: string; checkpoint: bigint }[]
+  >;
 }
 
 interface SetupContext {
-  client: SuiJsonRpcClient & {
-    core: {
-      signAndExecuteTransaction: (i: {
-        transaction: Transaction;
-        signer: unknown;
-        include?: unknown;
-      }) => Promise<{ $kind?: string; digest?: string }>;
-      waitForTransaction: (i: {
-        result: unknown;
-      }) => Promise<{ digest?: string }>;
-    };
-    queryTransactionBlocks(i: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: { digest?: string; objectChanges?: ObjectChange[] | null }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
-  };
+  client: SuiGrpcClient;
+  chain: NativeChain;
   packageId: string;
   attacker: Ed25519Keypair;
   admin: Ed25519Keypair;
@@ -96,28 +76,15 @@ async function runAndCreated(
   if (res.$kind === "FailedTransaction")
     throw new Error(`setup: ${label} tx failed`);
   await ctx.client.core.waitForTransaction({ result: res });
-  const digest = res.digest ?? (res as { digest?: string }).digest;
+  const digest = res.Transaction?.digest;
 
-  // Read the created objects back off-chain via the sender's tx history (the v2
-  // signAndExecute result doesn't include object changes, so query them).
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: signerAddr },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const t of page.data) {
-      if (digest && t.digest && t.digest !== digest) continue;
-      const ids: string[] = [];
-      for (const c of t.objectChanges ?? []) {
-        if (c.type === "created" && c.objectType === wantType && c.objectId)
-          ids.push(c.objectId);
-      }
-      if (ids.length > 0) return ids;
-    }
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
+  const ids = (await ctx.chain.findCreatedObjects(signerAddr))
+    .filter(
+      (object) =>
+        object.type === wantType && (!digest || object.digest === digest),
+    )
+    .map((object) => object.id);
+  if (ids.length > 0) return ids;
   throw new Error(`setup: ${label} created no ${wantType}`);
 }
 

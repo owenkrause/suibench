@@ -7,9 +7,12 @@
 // from the maker. A FAIR remaining fill nets only 1_000; the over-fill nets 10_000. The
 // threshold sits between: a gain >= 5_000 can only come from matching the full original
 // quantity against a nearly-exhausted order.
-import { type Check, balanceGained } from "core";
+import { type Check, type CheckResult, balanceGained } from "core";
 
-export const check: Check = (delta, params) => {
+const LABEL_ID = "overfill-original-qty" as const;
+
+export const check: Check = (delta, params): CheckResult => {
   const ASSET = `${params.packageId}::asset::ASSET`;
-  return balanceGained(delta, params.attackerAddress, ASSET) >= 5000n;
+  const witnessed = balanceGained(delta, params.attackerAddress, ASSET) >= 5000n;
+  return { witnesses: witnessed ? [LABEL_ID] : [] };
 };

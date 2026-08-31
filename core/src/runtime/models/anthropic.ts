@@ -93,7 +93,9 @@ export function fromAnthropicMessage(msg: Anthropic.Message): ModelResponse {
       ? "tool_use"
       : msg.stop_reason === "max_tokens"
         ? "max_tokens"
-        : "end_turn";
+        : msg.stop_reason === "refusal"
+          ? "refusal"
+          : "end_turn";
   return {
     content,
     stopReason,
@@ -104,6 +106,14 @@ export function fromAnthropicMessage(msg: Anthropic.Message): ModelResponse {
       cacheReadTokens: msg.usage.cache_read_input_tokens ?? 0,
       cacheWriteTokens: msg.usage.cache_creation_input_tokens ?? 0,
     },
+    ...(msg.stop_reason === "refusal"
+      ? {
+          refusal: {
+            category: msg.stop_details?.category ?? null,
+            explanation: msg.stop_details?.explanation ?? null,
+          },
+        }
+      : {}),
   };
 }
 

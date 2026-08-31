@@ -8,8 +8,16 @@
 //
 // `SandboxManager` owns container lifecycle/cleanup: every started container is
 // tracked and force-removed on teardown or on SIGINT/SIGTERM.
+//
+// The low-level Docker CLI plumbing lives in `docker.ts` — import primitives
+// from there directly, not from here. This module keeps the higher-level
+// pieces: SandboxManager, spawnAudit, materializeMount, buildPackage,
+// ContainerSandbox, plus the two-network topology additions
+// (createTrackedNetwork, launchGateContainer).
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { UNTRUSTED_IMAGE, GATE_IMAGE, CONFIRMER_IMAGE } from "./images.js";
+import { scopeAttackerContext } from "./context.js";
 import { resolve, isAbsolute, sep } from "node:path";
 import {
   chmodSync,
@@ -26,139 +34,39 @@ import {
   type ExecResult,
   type Mount,
 } from "core";
+import {
+  InfraError,
+  classifyDockerError,
+  infraError,
+  startContainer,
+  dockerExec,
+  copyIntoContainer,
+  copyFromContainer,
+  removeContainer,
+  createNetwork,
+  removeNetwork,
+  createContainer,
+  startCreated,
+  connectNetwork,
+  containerIp,
+  waitForReady,
+  readContextJson,
+  publishedPort,
+  type ContainerStartOptions,
+} from "./docker.js";
 
 const execFileAsync = promisify(execFile);
-
-// Isolation ceilings for untrusted in-container code; env-overridable per run.
-const CONTAINER_LIMITS = {
-  memory: process.env.SUIBENCH_MEM ?? "2g",
-  cpus: process.env.SUIBENCH_CPUS ?? "2",
-  pidsLimit: process.env.SUIBENCH_PIDS ?? "512",
-} as const;
-
-export const AUDIT_IMAGE = process.env.SUIBENCH_IMAGE ?? "suibench-auditor";
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** A Docker/host failure that prevented grading, rather than a target command exit. */
-export class InfraError extends Error {
-  constructor(
-    message: string,
-    readonly attempts = 1,
-  ) {
-    super(message);
-    this.name = "InfraError";
-  }
-}
-
-export type DockerErrorKind =
-  | "command"
-  | "infrastructure"
-  | "missing-container"
-  | "missing-artifact";
-
-function dockerErrorText(err: unknown): string {
-  const value = err as {
-    message?: unknown;
-    stdout?: unknown;
-    stderr?: unknown;
-  };
-  return [value?.message, value?.stdout, value?.stderr]
-    .filter((part): part is string => typeof part === "string")
-    .join("\n");
-}
-
-export function classifyDockerError(err: unknown): DockerErrorKind {
-  const value = err as {
-    code?: unknown;
-    killed?: unknown;
-    signal?: unknown;
-  };
-  const text = dockerErrorText(err);
-  if (
-    /could not find the file/i.test(text) ||
-    /lstat .*no such file/i.test(text)
-  ) {
-    return "missing-artifact";
-  }
-  if (/no such container|container .* is not running/i.test(text)) {
-    return "missing-container";
-  }
-  if (
-    typeof value?.code !== "number" ||
-    value.killed === true ||
-    value.signal ||
-    /cannot connect to the docker daemon|error during connect|is the docker daemon running|error response from daemon|no such image|pull access denied|context deadline exceeded|request canceled|tls handshake|i\/o timeout/i.test(
-      text,
-    )
-  ) {
-    return "infrastructure";
-  }
-  return "command";
-}
-
-function infraError(operation: string, err: unknown): InfraError {
-  return new InfraError(`${operation}: ${dockerErrorText(err) || errMsg(err)}`);
-}
-
-// --- Docker primitives -------------------------------------------------------
-
-export interface ContainerStartOptions {
-  image?: string;
-  /** Env passed into the container (TARGET_CONTRACT, NETWORK, PACKAGE_ID, …). */
-  env?: Record<string, string>;
-  /** A host dir bind-mounted read-only at /workspace/target-ro. */
-  mountDir?: string;
-  /** Publish the in-container localnet RPC (9000) to a host port. The confirmer
-   *  sets this; when unset (the AUDIT sandbox) the container gets `--network none`. */
-  publishRpc?: boolean;
-}
-
-export async function startContainer(
-  opts: ContainerStartOptions,
-): Promise<string> {
-  const args = [
-    "run",
-    "-d",
-    "--cap-drop=ALL",
-    "--security-opt=no-new-privileges",
-    "--user",
-    "1000:1000",
-    "--memory",
-    CONTAINER_LIMITS.memory,
-    "--cpus",
-    CONTAINER_LIMITS.cpus,
-    "--pids-limit",
-    CONTAINER_LIMITS.pidsLimit,
-  ];
-  for (const [k, v] of Object.entries(opts.env ?? {})) {
-    args.push("-e", `${k}=${v}`);
-  }
-  if (opts.mountDir) {
-    args.push("-v", `${resolve(opts.mountDir)}:/workspace/target-ro:ro`);
-  }
-  if (opts.publishRpc) {
-    args.push("-p", "127.0.0.1::9000");
-  } else {
-    // AUDIT sandbox: no egress. The localnet is loopback and the build hermetic,
-    // so cutting the network blocks the model under test from looking up vulns.
-    args.push("--network", "none");
-  }
-  args.push(opts.image ?? AUDIT_IMAGE);
-
-  try {
-    const { stdout } = await execFileAsync("docker", args);
-    return stdout.trim();
-  } catch (err) {
-    throw infraError("docker run", err);
-  }
-}
-
 /** Build the Move package at `mountDir` in a one-off container (no localnet),
- *  mirroring the entrypoint's `sui move build --build-env testnet`. `ok=false`
- *  iff the build exits non-zero (the patch doesn't compile). */
+ *  mirroring the entrypoint's `sui move build --build-env testnet`. Always
+ *  built OFFLINE (`--network none`): the framework cache is baked into the
+ *  image and packages are self-contained, so a legit build needs no egress —
+ *  and the caller is grading an untrusted patch that must never fetch deps.
+ *  `ok=false` iff the build exits non-zero (the patch doesn't compile). */
 export async function buildPackage(
   mountDir: string,
   image: string,
@@ -166,10 +74,13 @@ export async function buildPackage(
   const args = [
     "run",
     "--rm",
+    "--pull=never",
     "--cap-drop=ALL",
     "--security-opt=no-new-privileges",
     "--user",
     "1000:1000",
+    "--network",
+    "none",
     "-v",
     `${resolve(mountDir)}:/workspace/target-ro:ro`,
     "--entrypoint",
@@ -189,135 +100,6 @@ export async function buildPackage(
     }
     const e = err as { stdout?: string; stderr?: string };
     return { ok: false, output: `${e.stdout ?? ""}${e.stderr ?? String(err)}` };
-  }
-}
-
-/** Resolve the host-mapped URL for a container's published localnet RPC (9000). */
-export async function getMappedRpcUrl(containerId: string): Promise<string> {
-  const { stdout } = await execFileAsync("docker", ["port", containerId, "9000"]);
-  const hostPort = stdout.trim().split(":").pop();
-  if (!hostPort) {
-    throw new Error(
-      `could not resolve mapped RPC port for ${containerId.slice(0, 12)}`,
-    );
-  }
-  return `http://127.0.0.1:${hostPort}`;
-}
-
-const DEFAULT_READY_TIMEOUT_MS = (() => {
-  const raw = process.env.SUIBENCH_READY_TIMEOUT_MS;
-  const n = raw ? Number(raw) : NaN;
-  return Number.isFinite(n) && n > 0 ? n : 120_000;
-})();
-
-export async function waitForReady(
-  containerId: string,
-  timeoutMs = DEFAULT_READY_TIMEOUT_MS,
-): Promise<void> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    try {
-      await execFileAsync("docker", [
-        "exec",
-        containerId,
-        "test",
-        "-f",
-        "/workspace/.ready",
-      ]);
-      return;
-    } catch (err) {
-      const kind = classifyDockerError(err);
-      if (kind === "missing-container" || kind === "infrastructure") {
-        throw infraError("docker readiness probe", err);
-      }
-      await new Promise((r) => setTimeout(r, 2000));
-    }
-  }
-  throw new InfraError(
-    `Container ${containerId.slice(0, 12)} not ready after ${timeoutMs / 1000}s`,
-  );
-}
-
-export async function readContextJson(
-  containerId: string,
-): Promise<Record<string, string>> {
-  try {
-    const { stdout } = await execFileAsync("docker", [
-      "exec",
-      containerId,
-      "cat",
-      "/workspace/context.json",
-    ]);
-    return JSON.parse(stdout);
-  } catch (err) {
-    throw infraError("read container context", err);
-  }
-}
-
-export async function dockerExec(
-  containerId: string,
-  command: string,
-): Promise<ExecResult> {
-  try {
-    const { stdout, stderr } = await execFileAsync(
-      "docker",
-      ["exec", containerId, "bash", "-c", command],
-      { maxBuffer: 10 * 1024 * 1024, timeout: 120_000 },
-    );
-    return { stdout, stderr, exitCode: 0 };
-  } catch (err: unknown) {
-    const kind = classifyDockerError(err);
-    if (kind !== "command") throw infraError("docker exec", err);
-    const e = err as { stdout?: string; stderr?: string; code?: number };
-    return {
-      stdout: e.stdout ?? "",
-      stderr: e.stderr ?? String(err),
-      exitCode: e.code ?? 1,
-    };
-  }
-}
-
-export async function copyIntoContainer(
-  containerId: string,
-  localPath: string,
-  containerPath: string,
-): Promise<void> {
-  try {
-    await execFileAsync("docker", [
-      "cp",
-      localPath,
-      `${containerId}:${containerPath}`,
-    ]);
-  } catch (err) {
-    throw infraError("docker cp into container", err);
-  }
-}
-
-export async function copyFromContainer(
-  containerId: string,
-  containerPath: string,
-  localPath: string,
-): Promise<void> {
-  try {
-    await execFileAsync("docker", [
-      "cp",
-      `${containerId}:${containerPath}`,
-      localPath,
-    ]);
-  } catch (err) {
-    if (classifyDockerError(err) === "missing-artifact") {
-      throw new SandboxFileNotFoundError(containerPath);
-    }
-    throw infraError("docker cp from container", err);
-  }
-}
-
-export async function removeContainer(containerId: string): Promise<void> {
-  try {
-    await execFileAsync("docker", ["rm", "-f", containerId]);
-  } catch (err) {
-    if (classifyDockerError(err) === "missing-container") return;
-    throw infraError("docker rm", err);
   }
 }
 
@@ -412,21 +194,27 @@ export class ContainerSandbox implements Sandbox {
   }
 
   async teardown(): Promise<void> {
-    await this.manager.removeTrackedContainer(this.containerId);
+    await this.manager.remove(this.containerId);
   }
 }
 
 // --- SandboxManager ----------------------------------------------------------
 
-// The ONLY place container cleanup lives (also wired to SIGINT/SIGTERM) — no
-// adapter removes a container the manager doesn't know about.
+// The ONLY place Docker-resource cleanup lives (also wired to SIGINT/SIGTERM)
+// — no adapter removes a container or network the manager doesn't know about.
 export interface SandboxLifecycle {
   startContainer: typeof startContainer;
   removeContainer: typeof removeContainer;
 }
 
+type TrackedResource = {
+  id: string;
+  kind: "container" | "network";
+  remove: () => Promise<void>;
+};
+
 export class SandboxManager {
-  private readonly containers = new Map<string, string | undefined>();
+  private tracked: TrackedResource[] = [];
   private readonly pendingStarts = new Set<Promise<void>>();
   private cleanupRegistered = false;
   private closing = false;
@@ -441,55 +229,87 @@ export class SandboxManager {
     this.registerSignalHandlers();
   }
 
-  track(containerId: string, mountDir?: string): void {
-    const prior = this.containers.get(containerId);
-    this.containers.set(containerId, mountDir ?? prior);
+  /** The ONLY way a resource gets tracked. Barrier-guarded so a `create` still
+   *  in flight when teardownAll starts can't leak either side of the race: it
+   *  either gets torn down the instant it lands (already tracked, closing
+   *  flips mid-create) or is refused outright (closing was already true). */
+  async track(create: () => Promise<TrackedResource>): Promise<TrackedResource> {
+    if (this.closing) {
+      throw new InfraError("sandbox manager is shutting down");
+    }
+    let done!: () => void;
+    const p = new Promise<void>((r) => (done = r));
+    this.pendingStarts.add(p);
+    try {
+      const res = await create();
+      this.tracked.push(res);
+      if (this.closing) {
+        await res.remove();
+        this.tracked = this.tracked.filter((r) => r !== res);
+        throw new InfraError("sandbox manager is shutting down");
+      }
+      return res;
+    } finally {
+      this.pendingStarts.delete(p);
+      done();
+    }
   }
 
-  forget(containerId: string): void {
-    this.containers.delete(containerId);
+  /** Remove a tracked resource (container or network) by id/name and drop it
+   *  from tracking. A no-op if nothing by that id is tracked. */
+  async remove(id: string): Promise<void> {
+    const res = this.tracked.find((r) => r.id === id);
+    if (!res) return;
+    await res.remove();
+    this.tracked = this.tracked.filter((r) => r !== res);
   }
 
   list(): string[] {
-    return [...this.containers.keys()];
+    return this.tracked.map((r) => r.id);
+  }
+
+  private runSeq = 0;
+
+  /** Monotonic per-manager token (`r1`, `r2`, ...) for unique per-run resource
+   *  names (network names, etc.) — ASCII only, replaces `process.pid`. */
+  nextRunToken(): string {
+    return `r${++this.runSeq}`;
+  }
+
+  /** Create a Docker network and track it for teardown alongside containers
+   *  (chain-net/attack-net don't leak past the run). */
+  async createTrackedNetwork(
+    name: string,
+    opts: { internal?: boolean } = {},
+  ): Promise<string> {
+    await this.track(async () => {
+      await createNetwork(name, opts);
+      return { id: name, kind: "network", remove: () => removeNetwork(name) };
+    });
+    return name;
   }
 
   async startTrackedContainer(
     opts: ContainerStartOptions,
   ): Promise<string> {
-    if (this.closing) {
-      throw new InfraError("sandbox manager is shutting down");
-    }
-    let finishStart!: () => void;
-    const completion = new Promise<void>((resolve) => {
-      finishStart = resolve;
+    const { id } = await this.track(async () => {
+      const id = await this.lifecycle.startContainer(opts);
+      return {
+        id,
+        kind: "container",
+        remove: async () => {
+          await this.lifecycle.removeContainer(id);
+          if (opts.mountDir) {
+            try {
+              rmSync(opts.mountDir, { recursive: true, force: true });
+            } catch {
+              /* best-effort */
+            }
+          }
+        },
+      };
     });
-    this.pendingStarts.add(completion);
-    try {
-      const containerId = await this.lifecycle.startContainer(opts);
-      this.track(containerId, opts.mountDir);
-      if (this.closing) {
-        await this.removeTrackedContainer(containerId);
-        throw new InfraError("sandbox manager is shutting down");
-      }
-      return containerId;
-    } finally {
-      this.pendingStarts.delete(completion);
-      finishStart();
-    }
-  }
-
-  async removeTrackedContainer(containerId: string): Promise<void> {
-    const mountDir = this.containers.get(containerId);
-    await this.lifecycle.removeContainer(containerId);
-    this.containers.delete(containerId);
-    if (mountDir) {
-      try {
-        rmSync(mountDir, { recursive: true, force: true });
-      } catch {
-        /* best-effort */
-      }
-    }
+    return id;
   }
 
   /** Boot a `--network none` audit sandbox over a sanitized mount. */
@@ -501,12 +321,13 @@ export class SandboxManager {
     let containerId: string;
     try {
       containerId = await this.startTrackedContainer({
-        image: AUDIT_IMAGE,
-        env: { TARGET_CONTRACT: "target", NETWORK: "devnet", ...env },
+        image: UNTRUSTED_IMAGE,
+        env: { TARGET_CONTRACT: "target", NETWORK: "localnet", ...env },
         mountDir,
-        publishRpc: false,
       });
     } catch (err) {
+      // Nothing was tracked (the start itself failed), so the mountDir's
+      // cleanup closure never ran — clean it up here.
       try {
         rmSync(mountDir, { recursive: true, force: true });
       } catch {
@@ -525,20 +346,20 @@ export class SandboxManager {
     this.closing = true;
     await Promise.allSettled([...this.pendingStarts]);
 
-    let failures: unknown[] = [];
-    for (let attempt = 0; attempt < 2 && this.containers.size > 0; attempt++) {
-      const results = await Promise.allSettled(
-        this.list().map((id) => this.removeTrackedContainer(id)),
-      );
-      failures = results
-        .filter((result) => result.status === "rejected")
-        .map((result) => result.reason);
+    // Containers before networks — docker refuses `network rm` while a
+    // container is still attached to it. Order is otherwise independent of
+    // creation order since we group by kind.
+    for (const kind of ["container", "network"] as const) {
+      let remaining = this.tracked.filter((r) => r.kind === kind);
+      for (let attempt = 0; attempt < 2 && remaining.length > 0; attempt++) {
+        const results = await Promise.allSettled(remaining.map((r) => r.remove()));
+        remaining = remaining.filter((_, i) => results[i].status === "rejected");
+      }
+      for (const r of remaining) {
+        console.warn(`teardown ${kind} ${r.id} failed after retries (possible leak)`);
+      }
     }
-    if (this.containers.size > 0) {
-      throw new InfraError(
-        `failed to remove container(s) ${this.list().join(", ")}: ${failures.map(errMsg).join("; ")}`,
-      );
-    }
+    this.tracked = [];
   }
 
   private registerSignalHandlers(): void {
@@ -553,5 +374,220 @@ export class SandboxManager {
         this.teardownAll().finally(() => process.exit(code));
       });
     }
+  }
+}
+
+// --- Gate lifecycle ----------------------------------------------------------
+
+const GATE_DATA_PORT = 9000;
+
+const DEFAULT_GATE_READY_TIMEOUT_MS = (() => {
+  const raw = process.env.SUIBENCH_GATE_READY_TIMEOUT_MS;
+  const n = raw ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : 30_000;
+})();
+
+async function waitForGateLog(
+  containerId: string,
+  timeoutMs = DEFAULT_GATE_READY_TIMEOUT_MS,
+): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const { stdout } = await execFileAsync("docker", ["logs", containerId]);
+      if (/GATE_READY/.test(stdout)) return;
+    } catch (err) {
+      throw infraError("docker logs (gate readiness)", err);
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  throw new InfraError(
+    `Gate ${containerId.slice(0, 12)} not GATE_READY after ${timeoutMs / 1000}s`,
+  );
+}
+
+export interface LaunchGateOptions {
+  network: { attack: string; chain: string };
+  upstreamHost: string;
+  upstreamPort?: number;
+  controlPath?: string;
+  image?: string;
+  env?: Record<string, string>;
+}
+
+/** Launch the gate container: create on attack-net, connect chain-net, start,
+ *  wait for GATE_READY, and return its attack-net address — what the phase
+ *  (on attack-net only) dials. Tracks the container on create so a failed
+ *  connect/start/readiness still gets torn down. */
+export async function launchGateContainer(
+  manager: SandboxManager,
+  opts: LaunchGateOptions,
+): Promise<{ id: string; url: string }> {
+  const { id } = await manager.track(async () => {
+    const id = await createContainer({
+      image: opts.image ?? GATE_IMAGE,
+      network: opts.network.attack,
+      env: {
+        UPSTREAM_HOST: opts.upstreamHost,
+        ...(opts.upstreamPort ? { UPSTREAM_PORT: String(opts.upstreamPort) } : {}),
+        ...(opts.controlPath ? { CONTROL_PATH: opts.controlPath } : {}),
+        ...opts.env,
+      },
+    });
+    return { id, kind: "container", remove: () => removeContainer(id) };
+  });
+  // The container is tracked from `createContainer`; if any post-create step
+  // throws, reap it here (and drop it from tracking) so a partial launch doesn't
+  // leave a container for the caller's per-run cleanup to miss.
+  try {
+    await connectNetwork(id, opts.network.chain);
+    await startCreated(id);
+    await waitForGateLog(id);
+    const ip = await containerIp(id, opts.network.attack);
+    return { id, url: `http://${ip}:${GATE_DATA_PORT}` };
+  } catch (err) {
+    await manager.remove(id).catch(() => {});
+    throw err;
+  }
+}
+
+// --- Confirmer lifecycle -------------------------------------------------------
+
+/** Launch the confirmer container: create on chain-net (publishing its localnet
+ *  RPC to host-loopback) → cp the target to `/workspace/target-ro` (entrypoint.sh
+ *  copies it read-write and test-publishes it from there) → start → wait for
+ *  readiness → read its context.json. Returns the RAW context (incl. keypairs) —
+ *  callers that hand it to a phase must scope it themselves (see
+ *  `provisionPhase`/`scopeAttackerContext`). Tracks the container on create so a
+ *  failed cp/start/readiness still gets torn down. */
+export async function launchConfirmer(
+  manager: SandboxManager,
+  opts: { network: string; targetDir: string; env?: Record<string, string> },
+): Promise<{ id: string; publishedPort: number; chainIp: string; context: Record<string, string> }> {
+  const { id } = await manager.track(async () => {
+    const cid = await createContainer({
+      image: CONFIRMER_IMAGE,
+      network: opts.network,
+      publish: [{ containerPort: 9000, host: "127.0.0.1" }],
+      env: { TARGET_CONTRACT: "target", NETWORK: "localnet", ...opts.env },
+    });
+    return { id: cid, kind: "container" as const, remove: () => removeContainer(cid) };
+  });
+  // Tracked from `createContainer`; reap on any post-create failure (and drop it
+  // from tracking) so a partial launch doesn't escape the caller's per-run cleanup.
+  try {
+    await cpDir(id, opts.targetDir, "/workspace/target-ro");
+    await startCreated(id);
+    await waitForReady(id);
+    const context = await readContextJson(id);
+    const port = await publishedPort(id, 9000);
+    const chainIp = await containerIp(id, opts.network);
+    return { id, publishedPort: port, chainIp, context };
+  } catch (err) {
+    await manager.remove(id).catch(() => {});
+    throw err;
+  }
+}
+
+// --- Phase provisioning -------------------------------------------------------
+
+/** Write `contents` to a tmp file and `docker cp` it in. `chmodSync 0o644`
+ *  before the cp — do NOT rely on the host umask: under a restrictive umask
+ *  (e.g. 077) the tmp file lands 0600, `docker cp` preserves the mode, and the
+ *  uid-1000 phase runner can't read it (context.json / the attack script). */
+async function cpText(id: string, contents: string, containerPath: string): Promise<void> {
+  const tmp = mkdtempSync(join(tmpdir(), "suibench-phase-"));
+  const local = join(tmp, "f");
+  try {
+    writeFileSync(local, contents);
+    chmodSync(local, 0o644);
+    await copyIntoContainer(id, local, containerPath);
+  } finally {
+    try {
+      rmSync(tmp, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  }
+}
+
+/** `docker cp <hostDir>/. <id>:<containerPath>`. `hostDir` is a
+ *  `materializeMount` dir whose file modes are already explicit 0644/0755, so
+ *  no chmod pass is needed here (unlike `cpText`'s ad hoc tmp file). */
+async function cpDir(id: string, hostDir: string, containerPath: string): Promise<void> {
+  try {
+    await execFileAsync("docker", ["cp", `${resolve(hostDir)}/.`, `${id}:${containerPath}`]);
+  } catch (err) {
+    throw infraError("docker cp dir into container", err);
+  }
+}
+
+export interface PhaseOptions {
+  network: string;
+  gateUrl: string;
+  context: Record<string, string>;
+  targetDir: string; // host dir with the variant source
+  runnerBundle: { runner: string; chainDiscovery: string }; // host paths
+  attackScript: { name: string; contents: string };
+}
+
+/** Provision the untrusted phase container: create (tracked) → cp payload →
+ *  start. Runs as the image's uid-1000 user under --cap-drop=ALL throughout —
+ *  no root bootstrap, no gosu, no chown. The cp'd payload lands world-readable
+ *  and the runner only reads it; the target goes to /workspace/target-src,
+ *  which phase-entry.sh copies into a runner-owned, writable dir. `opts.context`
+ *  is the RAW/full context (same shape as the confirmer's context.json) — this
+ *  function scopes it via `scopeAttackerContext` itself, so admin/user keys
+ *  never reach the phase regardless of what the caller passes in. */
+export async function provisionPhase(
+  manager: SandboxManager,
+  opts: PhaseOptions,
+): Promise<{ id: string }> {
+  const { id } = await manager.track(async () => {
+    const cid = await createContainer({
+      image: UNTRUSTED_IMAGE,
+      network: opts.network,
+      entrypoint: ["/usr/local/bin/phase-entry.sh"],
+      env: {
+        RUNNER_BASE_URL: opts.gateUrl,
+        RUNNER_GRPC_WEB_BINARY: "1",
+        ATTACK_SCRIPT: opts.attackScript.name,
+      },
+      // `--ulimit fsize` (bytes, per POSIX RLIMIT_FSIZE) caps any single file
+      // the untrusted attack() can create — a portable backstop against a
+      // huge-file disk fill. It's on the phase container only, NOT in
+      // hardeningFlags(): the trusted confirmer may legitimately write larger
+      // build/localnet artifacts. 256 MiB is generous for a legit exploit
+      // (which writes small files) but bounds a hostile one.
+      //
+      // This does NOT cap the untrusted phase's TOTAL writable-overlay usage
+      // (many small files under the cap could still add up) — a size-capped
+      // tmpfs at /workspace can't be used here because provisioning `docker
+      // cp`s the target/runner/attack-script in before `docker start`, and a
+      // tmpfs mounted at start would shadow (hide) that pre-start payload.
+      // `--storage-opt size=` would cap the whole overlay but only works on
+      // daemons whose storage driver supports pquota (overlay2+xfs) — errors
+      // out on a stock ext4 host, so it can't be applied unconditionally here.
+      // Mitigate the residual at the deploy level: run the Docker data-root on
+      // a dedicated/bounded volume (so a fill can't take the host root down
+      // with it, e.g. Postgres/the server), or add `--storage-opt size=` where
+      // the host's storage driver supports it.
+      extraArgs: ["--ulimit", `fsize=${256 * 1024 * 1024}`],
+    });
+    return { id: cid, kind: "container" as const, remove: () => removeContainer(cid) };
+  });
+  // Tracked from `createContainer`; reap on any post-create failure (and drop it
+  // from tracking) so a partial launch doesn't escape the caller's per-run cleanup.
+  try {
+    await cpText(id, scopeAttackerContext(opts.context), "/workspace/context.json");
+    await cpText(id, opts.attackScript.contents, `/workspace/${opts.attackScript.name}`);
+    await copyIntoContainer(id, opts.runnerBundle.runner, "/workspace/runner.ts");
+    await copyIntoContainer(id, opts.runnerBundle.chainDiscovery, "/workspace/chain-discovery.ts");
+    await cpDir(id, opts.targetDir, "/workspace/target-src");
+    await startCreated(id);
+    return { id };
+  } catch (err) {
+    await manager.remove(id).catch(() => {});
+    throw err;
   }
 }

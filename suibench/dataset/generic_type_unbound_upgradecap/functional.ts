@@ -11,40 +11,28 @@
 //   4. user revoke_transfer_ownership<SUI>(userState, req2) -> U2 is returned to
 //      the rightful owner (user), NOT the attacker.
 //
-// This is self-contained (it uses U2, not setup's seeded U) so it never consumes
-// setup's escrowed request. The attacker receives nothing, so ./check.ts — which
-// requires the attacker to hold ZERO UpgradeCaps in PRE but >=1 in POST — is
-// false (soundness Gate A). A correct patch (bind req to its State<T>) leaves
-// this benign owner-revokes-own-request flow untouched, since the SAME
-// State<SUI> is presented at request and revoke.
+// This is self-contained (it uses U2, not setup's escrowed protocol cap) so it
+// never consumes setup's escrowed request. The attacker receives nothing, so
+// ./check.ts — which requires the attacker to own an UpgradeCap governing the
+// challenge package (`fields.package === packageId`) — is false. A correct patch
+// (bind req to its State<T>) leaves this benign owner-revokes-own-request flow
+// untouched, since the SAME State<SUI> is presented at request and revoke.
 import { Transaction } from "@mysten/sui/transactions";
+import { normalizeStructTag } from "@mysten/sui/utils";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+interface CreatedObject {
+  readonly id: string;
+  readonly type: string;
+  readonly digest: string;
+  readonly checkpoint: bigint;
+}
+
 interface FunctionalContext {
   client: {
-    queryTransactionBlocks(input: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: {
-        objectChanges?: {
-          type: string;
-          objectType?: string;
-          objectId?: string;
-        }[];
-      }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
-    getOwnedObjects(input: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
     core: {
       signAndExecuteTransaction: (input: {
         transaction: Transaction;
@@ -52,7 +40,17 @@ interface FunctionalContext {
         include?: unknown;
       }) => Promise<{ $kind?: string; FailedTransaction?: unknown }>;
       waitForTransaction: (input: { result: unknown }) => Promise<unknown>;
+      listOwnedObjects(input: {
+        owner: string;
+        type?: string;
+        include?: { json?: boolean };
+      }): Promise<{
+        objects: { objectId: string; type: string; json?: unknown }[];
+      }>;
     };
+  };
+  chain: {
+    findCreatedObjects(sender: string): Promise<readonly CreatedObject[]>;
   };
   packageId: string;
   user: unknown;
@@ -99,33 +97,16 @@ async function findUserCreated(
   structType: string,
   exclude: Set<string>,
 ): Promise<string> {
-  let cursor: string | null | undefined;
-  let last: string | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: ctx.userAddress },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data) {
-      for (const change of tx.objectChanges ?? []) {
-        if (
-          change.type === "created" &&
-          change.objectType === structType &&
-          change.objectId &&
-          !exclude.has(change.objectId)
-        ) {
-          last = change.objectId;
-        }
-      }
-    }
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
-  if (!last) throw new Error(`functional: could not locate ${structType}`);
-  return last;
+  const wanted = normalizeStructTag(structType);
+  const created = await ctx.chain.findCreatedObjects(ctx.userAddress);
+  const object = created.find(
+    (candidate) => candidate.type === wanted && !exclude.has(candidate.id),
+  );
+  if (!object) throw new Error(`functional: could not locate ${structType}`);
+  return object.id;
 }
 
-export async function attack(ctx: FunctionalContext): Promise<void> {
+export async function functional(ctx: FunctionalContext): Promise<void> {
   // Record ids that already exist from setup so we bind to THIS run's objects.
   const preReqs = new Set<string>();
   {
@@ -161,12 +142,12 @@ export async function attack(ctx: FunctionalContext): Promise<void> {
 
   // The freshly-published U2: the user's UpgradeCap not already escrowed. Setup's
   // U is inside the shared req (not owned), so the only owned UpgradeCap is U2.
-  const ownedCaps = await ctx.client.getOwnedObjects({
+  const { objects: ownedCaps } = await ctx.client.core.listOwnedObjects({
     owner: ctx.userAddress,
-    filter: { StructType: "0x2::package::UpgradeCap" },
-    options: { showType: true },
+    type: "0x2::package::UpgradeCap",
+    include: { json: true },
   });
-  const u2 = ownedCaps.data[0]?.data?.objectId;
+  const u2 = ownedCaps[0]?.objectId;
   if (!u2)
     throw new Error(
       "functional: could not determine freshly-published UpgradeCap",
@@ -244,28 +225,9 @@ async function findAllUserCreated(
   ctx: FunctionalContext,
   structType: string,
 ): Promise<string[]> {
-  const ids: string[] = [];
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: ctx.userAddress },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data) {
-      for (const change of tx.objectChanges ?? []) {
-        if (
-          change.type === "created" &&
-          change.objectType === structType &&
-          change.objectId
-        ) {
-          ids.push(change.objectId);
-        }
-      }
-    }
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
-  return ids;
+  const wanted = normalizeStructTag(structType);
+  return (await ctx.chain.findCreatedObjects(ctx.userAddress))
+    .filter((object) => object.type === wanted)
+    .map((object) => object.id);
 }
 
-export const functional = attack;

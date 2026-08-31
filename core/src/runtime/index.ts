@@ -1,8 +1,8 @@
-// Phase-2 runtime barrel: the audit agent (behind the Policy port), the
-// byte-equivalent prompt assembler, the CostMeter, and the model adapters.
+// Runtime barrel: the model↔tool loop, shared foundational prompt context, the
+// CostMeter, the reference library, and the model adapters.
 export * from "./prompt.js";
 export * from "./cost.js";
-export * from "./agent.js";
-export * from "./replay.js";
+export * from "./loop.js";
 export * from "./references.js";
 export * from "./models/index.js";
+export * from "./trajectory-sink.js";

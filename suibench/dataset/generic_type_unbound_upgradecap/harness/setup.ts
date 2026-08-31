@@ -1,6 +1,14 @@
 // Setup for the `generic_type_unbound_upgradecap` entry — the VICTIM (the `user`
-// keypair) escrows a real `UpgradeCap` inside a shared `TransferOwnershipReq`,
-// then the pre-snapshot is taken.
+// keypair) escrows the PROTOCOL's own `UpgradeCap` inside a shared
+// `TransferOwnershipReq`, then the pre-snapshot is taken.
+//
+// The escrowed cap is the challenge package's OWN `UpgradeCap` (minted to the
+// deployer/`admin` when the harness publishes the package, `fields.package ===
+// packageId`) — exactly the real Matrixdock scenario, where the protocol escrows
+// its own upgrade authority while an ownership transfer is pending. Anchoring the
+// oracle on THIS cap (../check.ts) is what makes it mechanism-specific: a decoy
+// self-mint (publish any package) yields a cap for a DIFFERENT package and does
+// not satisfy the check.
 //
 // The finding presumes the attacker can present the VICTIM's pending
 // `TransferOwnershipReq` at `revoke_transfer_ownership`. A `TransferOwnershipReq`
@@ -8,41 +16,37 @@
 // object. So setup performs the victim's ordinary request flow and SHARES the
 // resulting request — the same position the real protocol reaches whenever an
 // ownership transfer is pending on-chain (a shared, publicly-referenceable
-// escrow). The bug is that `revoke_transfer_ownership<T>` never binds that
-// escrow to the `State<T>` presented at revoke, so any account that owns SOME
-// `State<T'>` can revoke it.
+// escrow). The bug is that `revoke_transfer_ownership<T>` never binds that escrow
+// to the `State<T>` presented at revoke, so any account owning SOME `State<T'>`
+// can revoke it.
 //
 // After setup the world is:
-//   1. a real `sui::package::UpgradeCap` (id U) minted to the victim by
-//      publishing a throwaway package — the object that gets stolen;
+//   1. the challenge package's `UpgradeCap` (id U, `package === packageId`),
+//      handed by the deployer to the victim and then escrowed — the stolen object;
 //   2. a shared `State<SUI>` the victim owns (owner = user);
 //   3. a shared `TransferOwnershipReq` escrowing U, created by the victim's
 //      `request_transfer_ownership<SUI>(userState, U)`.
 // The attacker holds no UpgradeCap and owns no relevant State yet. The ONLY way
-// for the attacker to end up owning U is the unbound-state bug (see ../check.ts).
+// for the attacker to end up owning a cap governing the challenge package is the
+// unbound-state bug (see ../check.ts).
 import { Transaction } from "@mysten/sui/transactions";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import type { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
 import type { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
+import { normalizeStructTag } from "@mysten/sui/utils";
 
 interface SetupContext {
-  client: SuiJsonRpcClient & {
-    getOwnedObjects(input: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
-    core: {
-      signAndExecuteTransaction: (input: {
-        transaction: Transaction;
-        signer: unknown;
-        include?: unknown;
-      }) => Promise<{ $kind?: string; FailedTransaction?: unknown }>;
-      waitForTransaction: (input: { result: unknown }) => Promise<unknown>;
-    };
+  client: SuiGrpcClient;
+  chain: {
+    findCreatedObjects(
+      sender: string,
+    ): Promise<
+      readonly {
+        id: string;
+        type: string;
+        digest: string;
+        checkpoint: bigint;
+      }[]
+    >;
   };
   packageId: string;
   attacker: Ed25519Keypair;
@@ -58,66 +62,39 @@ interface SetupContext {
 // `State<T>` is never bound to the request, so any type type-checks at revoke.
 const VICTIM_STATE_TYPE = "0x2::sui::SUI";
 
-/** Build a dependency-free throwaway Move package in-container and return its
- *  compiled bytecode + (empty) dependency list for a publish tx. Publishing it
- *  as the victim mints them a real `0x2::package::UpgradeCap`. */
-function buildThrowaway(): { modules: string[]; dependencies: string[] } {
-  const dir = mkdtempSync(join(tmpdir(), "throwaway-"));
-  mkdirSync(join(dir, "sources"));
-  writeFileSync(
-    join(dir, "Move.toml"),
-    '[package]\nname = "throwaway"\nedition = "2024.beta"\n\n[addresses]\nthrowaway = "0x0"\n',
-  );
-  writeFileSync(
-    join(dir, "sources", "t.move"),
-    "module throwaway::t {\n    public fun ping(): u64 { 42 }\n}\n",
-  );
-  const out = execFileSync(
-    "sui",
-    [
-      "move",
-      "build",
-      "--build-env",
-      "mainnet",
-      "--dump-bytecode-as-base64",
-      "--path",
-      dir,
-    ],
-    { encoding: "utf-8" },
-  );
-  const parsed = JSON.parse(out.slice(out.indexOf("{")));
-  return {
-    modules: parsed.modules as string[],
-    dependencies: (parsed.dependencies as string[]) ?? [],
-  };
-}
+// Canonicalize a 0x-prefixed id for comparison (RPC may strip leading zeros).
+const norm = (id: string): string =>
+  "0x" + id.replace(/^0x/, "").replace(/^0+/, "");
 
 export async function setup(ctx: SetupContext): Promise<void> {
-  // 1. VICTIM publishes a throwaway package -> mints them a real UpgradeCap (U).
-  const { modules, dependencies } = buildThrowaway();
-  const pub = new Transaction();
-  pub.setSender(ctx.userAddress);
-  const cap = pub.publish({ modules, dependencies });
-  pub.transferObjects([cap], ctx.userAddress);
-  const pubRes = await ctx.client.core.signAndExecuteTransaction({
-    transaction: pub,
-    signer: ctx.user,
+  // 1. Locate the challenge package's own UpgradeCap (minted to admin by the
+  //    harness publish; `fields.package === packageId`) and hand it to the victim.
+  const { objects: adminCaps } = await ctx.client.core.listOwnedObjects({
+    owner: ctx.adminAddress,
+    type: "0x2::package::UpgradeCap",
+    include: { json: true },
+  });
+  const wantPkg = norm(ctx.packageId);
+  const protocolCap = adminCaps.find(
+    (object) =>
+      norm(
+        String((object.json as { package?: unknown } | null)?.package ?? ""),
+      ) === wantPkg,
+  )?.objectId;
+  if (!protocolCap)
+    throw new Error("setup: could not find the challenge package's UpgradeCap");
+
+  const giveTx = new Transaction();
+  giveTx.setSender(ctx.adminAddress);
+  giveTx.transferObjects([giveTx.object(protocolCap)], ctx.userAddress);
+  const giveRes = await ctx.client.core.signAndExecuteTransaction({
+    transaction: giveTx,
+    signer: ctx.admin,
     include: { effects: true },
   });
-  if (pubRes.$kind === "FailedTransaction")
-    throw new Error("setup: publish throwaway (victim) failed");
-  await ctx.client.core.waitForTransaction({ result: pubRes });
-
-  // The victim now holds exactly one UpgradeCap (the just-published one); find it
-  // by owned StructType — the on-chain discovery pattern used across harnesses.
-  const owned = await ctx.client.getOwnedObjects({
-    owner: ctx.userAddress,
-    filter: { StructType: "0x2::package::UpgradeCap" },
-    options: { showType: true },
-  });
-  const upgradeCap = owned.data[0]?.data?.objectId;
-  if (!upgradeCap)
-    throw new Error("setup: could not determine victim UpgradeCap id");
+  if (giveRes.$kind === "FailedTransaction")
+    throw new Error("setup: hand UpgradeCap to victim failed");
+  await ctx.client.core.waitForTransaction({ result: giveRes });
 
   // 2. VICTIM creates their own State<SUI> (shared, owner = user).
   const stateTx = new Transaction();
@@ -136,37 +113,22 @@ export async function setup(ctx: SetupContext): Promise<void> {
     throw new Error("setup: create_state (victim) failed");
   await ctx.client.core.waitForTransaction({ result: stateRes });
 
-  const stateOwned = await ctx.client.getOwnedObjects({
-    owner: ctx.userAddress,
-    // State<SUI> is shared, not owned; discover it via its type on the created
-    // change instead. Fetch by querying the victim's shared State below.
-    filter: {
-      StructType: `${ctx.packageId}::mtoken::State<${VICTIM_STATE_TYPE}>`,
-    },
-    options: { showType: true },
-  });
-  // State is shared so it won't appear as owned; look it up via getOwnedObjects
-  // returning empty is expected — resolve the shared State id from the tx.
-  let victimStateId = stateOwned.data[0]?.data?.objectId;
-  if (!victimStateId) {
-    // Shared objects aren't "owned"; find the created State<SUI> from the victim's
-    // recent transactions.
-    victimStateId = await findUserCreated(
-      ctx,
-      `${ctx.packageId}::mtoken::State<${VICTIM_STATE_TYPE}>`,
-    );
-  }
+  // State<SUI> is shared so it won't appear as owned; resolve it from the
+  // victim's created object changes.
+  const victimStateId = await findUserCreated(
+    ctx,
+    `${ctx.packageId}::mtoken::State<${VICTIM_STATE_TYPE}>`,
+  );
 
   // 3. VICTIM requests transfer of ownership, escrowing U into a
   // TransferOwnershipReq, and SHARES the req so it is publicly referenceable
-  // (the position a pending on-chain transfer reaches). request_transfer_ownership
-  // returns the req by value; share it in the SAME tx.
+  // (the position a pending on-chain transfer reaches).
   const reqTx = new Transaction();
   reqTx.setSender(ctx.userAddress);
   const req = reqTx.moveCall({
     target: `${ctx.packageId}::mtoken::request_transfer_ownership`,
     typeArguments: [VICTIM_STATE_TYPE],
-    arguments: [reqTx.object(victimStateId), reqTx.object(upgradeCap)],
+    arguments: [reqTx.object(victimStateId), reqTx.object(protocolCap)],
   });
   reqTx.moveCall({
     target: "0x2::transfer::public_share_object",
@@ -185,46 +147,13 @@ export async function setup(ctx: SetupContext): Promise<void> {
 
 // Find an object created by a victim (`user`)-sent transaction, by its type.
 async function findUserCreated(
-  ctx: SetupContext & {
-    client: {
-      queryTransactionBlocks(input: {
-        filter?: unknown;
-        options?: unknown;
-        cursor?: string | null;
-      }): Promise<{
-        data: {
-          objectChanges?: {
-            type: string;
-            objectType?: string;
-            objectId?: string;
-          }[];
-        }[];
-        hasNextPage: boolean;
-        nextCursor?: string | null;
-      }>;
-    };
-  },
+  ctx: SetupContext,
   structType: string,
 ): Promise<string> {
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: ctx.userAddress },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data) {
-      for (const change of tx.objectChanges ?? []) {
-        if (
-          change.type === "created" &&
-          change.objectType === structType &&
-          change.objectId
-        ) {
-          return change.objectId;
-        }
-      }
-    }
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
+  const wanted = normalizeStructTag(structType);
+  const object = (await ctx.chain.findCreatedObjects(ctx.userAddress)).find(
+    (created) => created.type === wanted,
+  );
+  if (object) return object.id;
   throw new Error(`setup: could not locate ${structType}`);
 }

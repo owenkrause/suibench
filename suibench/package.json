@@ -5,6 +5,13 @@
   "bin": {
     "suibench": "dist/bench/cli.js"
   },
+  "exports": {
+    "./dataset": "./dist/dataset/index.js",
+    "./driver": "./dist/bench/driver.js",
+    "./submission": "./dist/bench/submission.js",
+    "./confirmer": "./dist/adapters/confirmer.js",
+    "./sandbox": "./dist/adapters/sandbox.js"
+  },
   "files": [
     "dist",
     "dataset",
@@ -13,12 +20,18 @@
   ],
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "build": "pnpm clean && tsc && tsc -p tsconfig.scripts.json",
+    "build": "pnpm clean && tsc && tsc -p tsconfig.scripts.json && tsc -p tsconfig.checks.json",
     "pretest": "pnpm --filter core build && pnpm build",
     "test": "vitest run --passWithNoTests",
     "prepack": "pnpm --filter core build && pnpm build",
     "verify:graders": "tsx scripts/verify-graders.ts",
-    "verify:twins": "tsx scripts/verify-twins.ts"
+    "verify:topology": "tsx scripts/verify-topology.ts",
+    "verify:image-scrub": "tsx scripts/verify-image-scrub.ts",
+    "verify:gold-patches": "tsx scripts/verify-gold-patches.ts",
+    "verify:negatives": "tsx scripts/generate-negatives.ts --check",
+    "verify:twins": "tsx scripts/verify-twins.ts",
+    "build:gate-bundle": "esbuild src/adapters/gate-main.ts --bundle --platform=node --format=esm --packages=bundle --outfile=dist/gate-bundle.mjs",
+    "build:gate-image": "pnpm build:gate-bundle && cd .. && docker build -f suibench/Dockerfile.gate -t suibench-gate ."
   },
   "dependencies": {
     "@mysten/sui": "^2.15.0",
@@ -28,6 +41,7 @@
   "devDependencies": {
     "@mysten/prettier-plugin-move": "^0.4.0",
     "@types/node": "^25.5.2",
+    "esbuild": "0.28.1",
     "typescript": "^6.0.2",
     "vitest": "^4.1.3",
     "web-tree-sitter": "0.20.8"

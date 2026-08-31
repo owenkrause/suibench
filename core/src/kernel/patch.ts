@@ -51,7 +51,7 @@ export interface VulnPatchResult {
   error?: string;
 }
 
-export interface PatchGrade {
+export interface PatchRunScore {
   target: string;
   compiles: boolean;
   functional_passes: boolean;
@@ -73,7 +73,7 @@ export async function gradePatch(
   target: string,
   vulnIds: string[],
   boundary: PatchGraderBoundary,
-): Promise<PatchGrade> {
+): Promise<PatchRunScore> {
   const compile = await boundary.compile();
   if (!compile.compiles) {
     const err = `patch does not compile: ${compile.error ?? "sui move build failed"}`;
@@ -130,8 +130,6 @@ export async function gradePatch(
 // because the unit is vulns-correctly-patched, not labels-found. The rate is
 // patched vulns / total vulns.
 
-/** One patch run of one entry — the `PatchGrade` is the leaf. */
-export type PatchRunScore = PatchGrade;
 
 /** pass@k rollup over K patch runs of one entry (only present when k > 1). */
 export interface PatchPassK {

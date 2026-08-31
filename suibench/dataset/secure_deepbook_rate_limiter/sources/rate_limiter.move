@@ -1,132 +1,92 @@
-/// Token bucket rate limiter for controlling withdrawal rates.
+/// Token-bucket rate limiter gating withdrawals from a shared pool.
 module challenge::rate_limiter;
 
 use std::u128::min;
+use sui::balance::{Self, Balance};
 use sui::clock::Clock;
+use sui::coin::{Self, Coin};
+use challenge::asset::ASSET;
+
+const ERateLimited: u64 = 0;
+
+const CAPACITY: u64 = 1_000_000_000;
+const REFILL_PER_MS: u64 = 1_000;
 
 public struct RateLimiter has store {
     available: u64,
     last_updated_ms: u64,
     capacity: u64,
     refill_rate_per_ms: u64,
-    enabled: bool,
 }
 
-// === Public-Package Functions ===
-
-public(package) fun new(
-    capacity: u64,
-    refill_rate_per_ms: u64,
-    enabled: bool,
-    clock: &Clock,
-): RateLimiter {
-    RateLimiter {
-        available: capacity,
-        last_updated_ms: clock.timestamp_ms(),
-        capacity,
-        refill_rate_per_ms,
-        enabled,
-    }
+public struct Pool has key {
+    id: UID,
+    funds: Balance<ASSET>,
+    limiter: RateLimiter,
 }
 
-public(package) fun check_and_record_withdrawal(
-    self: &mut RateLimiter,
-    amount: u64,
-    clock: &Clock,
-): bool {
-    if (!self.enabled) return true;
-
-    self.refill(clock);
-
-    if (amount > self.available) {
-        return false
-    };
-
-    self.available = self.available - amount;
-    true
+fun init(ctx: &mut TxContext) {
+    transfer::share_object(Pool {
+        id: object::new(ctx),
+        funds: balance::zero(),
+        limiter: RateLimiter {
+            available: CAPACITY,
+            last_updated_ms: 0,
+            capacity: CAPACITY,
+            refill_rate_per_ms: REFILL_PER_MS,
+        },
+    });
 }
 
-public(package) fun record_deposit(self: &mut RateLimiter, amount: u64, clock: &Clock) {
-    if (!self.enabled) return;
+// === Public Entry Points ===
 
-    self.refill(clock);
-
-    let new_available = (self.available as u128) + (amount as u128);
-    self.available = min(new_available, self.capacity as u128) as u64;
+public fun deposit(pool: &mut Pool, coin: Coin<ASSET>, clock: &Clock) {
+    let amount = coin::value(&coin);
+    record_deposit(&mut pool.limiter, amount, clock);
+    balance::join(&mut pool.funds, coin::into_balance(coin));
 }
 
-public(package) fun get_available_withdrawal(self: &RateLimiter, clock: &Clock): u64 {
-    if (!self.enabled) return std::u64::max_value!();
-
-    let current_time = clock.timestamp_ms();
-    let elapsed = if (current_time > self.last_updated_ms) {
-        current_time - self.last_updated_ms
-    } else {
-        0
-    };
-    let refill_amount = (elapsed as u128) * (self.refill_rate_per_ms as u128);
-    let new_available = (self.available as u128) + refill_amount;
-
-    min(new_available, self.capacity as u128) as u64
-}
-
-public(package) fun update_config(
-    self: &mut RateLimiter,
-    capacity: u64,
-    refill_rate_per_ms: u64,
-    enabled: bool,
-    clock: &Clock,
-) {
-    // Accumulate available using the old rate before updating config
-    self.refill(clock);
-    self.capacity = capacity;
-    self.refill_rate_per_ms = refill_rate_per_ms;
-    self.enabled = enabled;
-    if (self.available > capacity) {
-        self.available = capacity;
-    };
+public fun withdraw(pool: &mut Pool, amount: u64, clock: &Clock, ctx: &mut TxContext): Coin<ASSET> {
+    assert!(check_and_record_withdrawal(&mut pool.limiter, amount, clock), ERateLimited);
+    coin::from_balance(balance::split(&mut pool.funds, amount), ctx)
 }
 
 // === Public View Functions ===
 
-public fun is_enabled(self: &RateLimiter): bool {
-    self.enabled
+public fun available(pool: &Pool, clock: &Clock): u64 {
+    let self = &pool.limiter;
+    let now = clock.timestamp_ms();
+    let elapsed = if (now > self.last_updated_ms) now - self.last_updated_ms else 0;
+    let refilled = (self.available as u128) + (elapsed as u128) * (self.refill_rate_per_ms as u128);
+    min(refilled, self.capacity as u128) as u64
 }
 
-public fun capacity(self: &RateLimiter): u64 {
-    self.capacity
-}
-
-public fun refill_rate_per_ms(self: &RateLimiter): u64 {
-    self.refill_rate_per_ms
+public fun balance(pool: &Pool): u64 {
+    balance::value(&pool.funds)
 }
 
 // === Internal Functions ===
 
-fun refill(self: &mut RateLimiter, clock: &Clock) {
-    let current_time = clock.timestamp_ms();
-    let elapsed = if (current_time > self.last_updated_ms) {
-        current_time - self.last_updated_ms
-    } else {
-        0
-    };
+fun record_deposit(self: &mut RateLimiter, amount: u64, clock: &Clock) {
+    refill(self, clock);
+    let new_available = (self.available as u128) + (amount as u128);
+    self.available = min(new_available, self.capacity as u128) as u64;
+}
 
+fun check_and_record_withdrawal(self: &mut RateLimiter, amount: u64, clock: &Clock): bool {
+    refill(self, clock);
+    if (amount > self.available) return false;
+    self.available = self.available - amount;
+    true
+}
+
+fun refill(self: &mut RateLimiter, clock: &Clock) {
+    let now = clock.timestamp_ms();
+    let elapsed = if (now > self.last_updated_ms) now - self.last_updated_ms else 0;
     if (elapsed > 0) {
         let refill_amount = (elapsed as u128) * (self.refill_rate_per_ms as u128);
         let new_available = (self.available as u128) + refill_amount;
         self.available = min(new_available, self.capacity as u128) as u64;
-        self.last_updated_ms = current_time;
-    }
-}
-
-// === Test-only Functions ===
-
-#[test_only]
-public fun available(self: &RateLimiter): u64 {
-    self.available
-}
-
-#[test_only]
-public fun last_updated_ms(self: &RateLimiter): u64 {
-    self.last_updated_ms
+        self.last_updated_ms = now;
+    };
 }

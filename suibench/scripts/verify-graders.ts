@@ -9,13 +9,17 @@
 import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { Action, Exploit, RunScore, RunEnv } from "core";
+import type { Exploit, RunScore, RunEnv } from "core";
 import { loadEntry, type DatasetEntry } from "../src/dataset/index.js";
 import { benchEntry, type BenchDeps, type RunConfig } from "../src/bench/driver.js";
-import { scriptedPolicyFactory } from "../src/bench/policies.js";
 import { Confirmer } from "../src/adapters/confirmer.js";
 import { SandboxManager } from "../src/adapters/sandbox.js";
 import { boundedMap } from "../src/util/bounded.js";
+import type { TrajectorySink } from "core/runtime";
+
+// This gate replays committed reference exploits, not agent runs — no
+// trajectory worth keeping.
+export const noopSink: TrajectorySink = { save: async () => {} };
 
 export function evaluateGrade(run: RunScore): { pass: boolean; reasons: string[] } {
   const m = run.metrics;
@@ -31,6 +35,12 @@ export function evaluateGrade(run: RunScore): { pass: boolean; reasons: string[]
   }
   if (m.recall !== 1) reasons.push(`expected recall 1, got ${m.recall}`);
   if (m.false_positives > 0) reasons.push(`${m.false_positives} false positive(s)`);
+  if (m.unattributed_findings > 0) {
+    reasons.push(`${m.unattributed_findings} unattributed finding(s)`);
+  }
+  if (m.attribution_rate !== 1) {
+    reasons.push(`expected attribution rate 1, got ${m.attribution_rate}`);
+  }
   if (m.findings_total === 0) reasons.push("no findings reported");
   else if (m.true_positives !== m.findings_total) reasons.push("a reported finding was not a true positive");
   if (run.findings.length === 0) reasons.push("score contains no finding results");
@@ -61,12 +71,13 @@ export function evaluateGrade(run: RunScore): { pass: boolean; reasons: string[]
   return { pass: reasons.length === 0, reasons };
 }
 
-export function buildReferenceActions(entry: DatasetEntry): Action[] {
-  const actions: Action[] = [];
+/** The entry's committed reference exploit(s), shaped as a run's reports. */
+export function buildReferenceExploits(entry: DatasetEntry): Exploit[] {
+  const exploits: Exploit[] = [];
   for (const vuln of entry.manifest.vulns) {
     const path = entry.exploits[vuln.id];
     if (!path) continue;
-    const exploit: Exploit = {
+    exploits.push({
       finding: {
         id: vuln.id,
         module: vuln.module,
@@ -75,11 +86,23 @@ export function buildReferenceActions(entry: DatasetEntry): Action[] {
         description: vuln.root_cause,
       },
       script: { path: `${vuln.id}.mts`, contents: readFileSync(path, "utf-8") },
-    };
-    actions.push({ kind: "report_exploit", exploit });
+    });
   }
-  actions.push({ kind: "run_bash", command: ":" });
-  return actions;
+  return exploits;
+}
+
+/** Replay those exploits as this entry's run — the gate's stand-in for the agent. */
+export function referenceRun(entry: DatasetEntry): NonNullable<BenchDeps["runFor"]> {
+  return async () => {
+    const exploits = buildReferenceExploits(entry);
+    return {
+      exploits,
+      findings: exploits.map((e) => e.finding),
+      conversation: { systemPrompt: "", messages: [] },
+      stopReason: "end_turn" as const,
+      cost: { inputTokens: 0, outputTokens: 0, turns: 0 },
+    };
+  };
 }
 
 export interface VerifyDeps {
@@ -111,8 +134,9 @@ export async function verifyEntry(
 
   const config: RunConfig = { harness: "harnessed", axis: "exploitation", env: deps.env, k: 1 };
   const benchDeps: BenchDeps = {
-    policyFor: scriptedPolicyFactory({ [entry.target]: buildReferenceActions(entry) }),
+    runFor: referenceRun(entry),
     graderFor: (e) => new Confirmer(deps.manager, e.harness),
+    sink: noopSink,
   };
   const entryScore = await benchEntry(entry, config, benchDeps);
   const { pass, reasons } = evaluateGrade(entryScore.run);
@@ -163,13 +187,17 @@ export async function verifyDatasetEntryDir(
 
 export async function main(): Promise<number> {
   const datasetDir = resolve(import.meta.dirname, "../dataset");
-  const dirs = datasetEntryDirs(datasetDir);
+  // Optional entry-name args narrow the run to those entries (per-entry validation).
+  const only = process.argv.slice(2);
+  const dirs = datasetEntryDirs(datasetDir).filter(
+    (d) => only.length === 0 || only.includes(basename(d)),
+  );
   if (dirs.length === 0) {
     console.error("verify:graders — no dataset entries found");
     return 1;
   }
   const manager = new SandboxManager();
-  const env: RunEnv = { network: "devnet", model: "none", effort: "low" };
+  const env: RunEnv = { model: "none", effort: "low" };
   try {
     const candidates = await boundedMap(dirs, 3, (dir) =>
       verifyDatasetEntryDir(dir, { manager, env }),

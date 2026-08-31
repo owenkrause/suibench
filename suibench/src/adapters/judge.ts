@@ -49,6 +49,9 @@ Which candidate index describes the SAME underlying flaw (same root cause) as th
         `judge request failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+    if (resp.stopReason === "max_tokens") {
+      throw new AgentError("judge response exceeded the maximum token limit");
+    }
     const text = resp.content
       .filter((b): b is { type: "text"; text: string } => b.type === "text")
       .map((b) => b.text)

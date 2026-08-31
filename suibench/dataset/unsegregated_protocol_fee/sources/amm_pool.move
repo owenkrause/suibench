@@ -1,6 +1,7 @@
 module challenge::amm_pool {
     use sui::balance::{Self, Balance};
     use sui::coin::{Self, Coin};
+    use sui::event;
     use sui::table::{Self, Table};
     use challenge::asset::ASSET;
 
@@ -14,6 +15,31 @@ module challenge::amm_pool {
         lp: Table<address, u64>,
     }
 
+    public struct AdminCap has key, store {
+        id: UID,
+    }
+
+    /// Neutral before-state accounting for a liquidity removal. The event is
+    /// emitted after the payout coin exists so it binds the arithmetic to that
+    /// exact object without changing the pool's behavior.
+    public struct LiquidityRemoval has copy, drop {
+        actor: address,
+        payout_coin_id: ID,
+        lp_amount: u64,
+        reserve_before: u64,
+        protocol_fee: u64,
+        total_lp_before: u64,
+        actual_payout: u64,
+    }
+
+    /// A caller-visible proof that an ASSET coin passed as an owned input is
+    /// controlled by the transaction sender at inspection time.
+    public struct AssetControl has copy, drop {
+        controller: address,
+        coin_id: ID,
+        value: u64,
+    }
+
     fun init(ctx: &mut TxContext) {
         transfer::share_object(Pool {
             id: object::new(ctx),
@@ -22,6 +48,7 @@ module challenge::amm_pool {
             total_lp: 0,
             lp: table::new(ctx),
         });
+        transfer::transfer(AdminCap { id: object::new(ctx) }, ctx.sender());
     }
 
     public fun add_liquidity(pool: &mut Pool, coin: Coin<ASSET>, ctx: &TxContext): u64 {
@@ -54,8 +81,37 @@ module challenge::amm_pool {
         let held = table::borrow_mut(&mut pool.lp, owner);
         assert!(*held >= lp_amount, EInsufficientLp);
         *held = *held - lp_amount;
-        let payout = lp_amount * balance::value(&pool.reserve) / pool.total_lp;
+        let reserve_before = balance::value(&pool.reserve);
+        let protocol_fee = pool.protocol_fee;
+        let total_lp_before = pool.total_lp;
+        let actual_payout = lp_amount * reserve_before / total_lp_before;
         pool.total_lp = pool.total_lp - lp_amount;
-        coin::from_balance(balance::split(&mut pool.reserve, payout), ctx)
+        let payout = coin::from_balance(balance::split(&mut pool.reserve, actual_payout), ctx);
+        event::emit(LiquidityRemoval {
+            actor: owner,
+            payout_coin_id: object::id(&payout),
+            lp_amount,
+            reserve_before,
+            protocol_fee,
+            total_lp_before,
+            actual_payout,
+        });
+        payout
+    }
+
+    public fun inspect_asset(asset: &Coin<ASSET>, ctx: &TxContext) {
+        event::emit(AssetControl {
+            controller: ctx.sender(),
+            coin_id: object::id(asset),
+            value: coin::value(asset),
+        });
+    }
+
+    // Admin sweeps the accrued fee out of reserve; clamped to available reserve.
+    public fun collect_fees(_cap: &AdminCap, pool: &mut Pool, ctx: &mut TxContext): Coin<ASSET> {
+        let avail = balance::value(&pool.reserve);
+        let amount = if (pool.protocol_fee <= avail) pool.protocol_fee else avail;
+        pool.protocol_fee = pool.protocol_fee - amount;
+        coin::from_balance(balance::split(&mut pool.reserve, amount), ctx)
     }
 }

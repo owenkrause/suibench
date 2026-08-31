@@ -1,11 +1,12 @@
 {
+  "id": "chal_ec7a291e",
   "version": 1,
   "vulns": [
     {
       "id": "critbit-brick",
       "module": "critbit",
       "title": "is_left_child asserts parent_index against table length, permanently bricking the tree after deletions",
-      "severity": "critical",
+      "severity": "high",
       "harm": "availability",
       "root_cause": "is_left_child asserts `parent_index < table::length(&tree.internal_nodes)` before borrowing the internal node. table::length is the COUNT of live internal nodes, not the max live index: internal nodes are keyed by an ever-growing next_internal_node_index, and remove_leaf_by_index deletes internal nodes without renumbering, so live indices become non-contiguous and can exceed the table's current length. A later valid call to is_left_child (reached from next_leaf/previous_leaf/insert_leaf/remove_leaf_by_index) with such an index then trips the assert and aborts, permanently DoS'ing the tree. The check is both wrong and redundant; the fix is to delete the assert.",
       "exploit": true,

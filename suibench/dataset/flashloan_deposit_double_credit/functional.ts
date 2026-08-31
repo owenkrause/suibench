@@ -28,20 +28,11 @@ import { Transaction } from "@mysten/sui/transactions";
 // A small, legitimate lender deposit (well under the 1000-FLASH pool seed).
 const DEPOSIT_AMOUNT = 100n;
 
-interface ObjectChange {
-  type: string;
-  objectType?: string;
-  objectId?: string;
-}
-
-interface TxPage {
-  data: { objectChanges?: ObjectChange[] | null }[];
-  hasNextPage: boolean;
-  nextCursor?: string | null;
-}
-
-interface OwnedObjectsPage {
-  data: { data?: { objectId?: string } }[];
+interface CreatedObject {
+  readonly id: string;
+  readonly type: string;
+  readonly digest: string;
+  readonly checkpoint: bigint;
 }
 
 interface FunctionalContext {
@@ -53,17 +44,17 @@ interface FunctionalContext {
         include?: unknown;
       }) => Promise<{ $kind?: string; FailedTransaction?: unknown }>;
       waitForTransaction: (input: { result: unknown }) => Promise<unknown>;
+      listOwnedObjects(input: {
+        owner: string;
+        type?: string;
+        include?: { json?: boolean };
+      }): Promise<{
+        objects: { objectId: string; type: string; json?: unknown }[];
+      }>;
     };
-    queryTransactionBlocks(input: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<TxPage>;
-    getOwnedObjects(input: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<OwnedObjectsPage>;
+  };
+  chain: {
+    findCreatedObjects(sender: string): Promise<readonly CreatedObject[]>;
   };
   packageId: string;
   admin: unknown;
@@ -84,26 +75,10 @@ async function findFlashLender(ctx: FunctionalContext): Promise<string> {
     ctx.attackerAddress,
     ctx.userAddress,
   ]) {
-    let cursor: string | null | undefined;
-    do {
-      const page = await ctx.client.queryTransactionBlocks({
-        filter: { FromAddress: owner },
-        options: { showObjectChanges: true },
-        cursor,
-      });
-      for (const tx of page.data) {
-        for (const change of tx.objectChanges ?? []) {
-          if (
-            change.type === "created" &&
-            change.objectType === want &&
-            change.objectId
-          ) {
-            return change.objectId;
-          }
-        }
-      }
-      cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-    } while (cursor);
+    const lender = (await ctx.chain.findCreatedObjects(owner)).find(
+      (object) => object.type === want,
+    );
+    if (lender) return lender.id;
   }
   throw new Error(
     `functional: could not locate shared FlashLender for package ${ctx.packageId}`,
@@ -113,12 +88,12 @@ async function findFlashLender(ctx: FunctionalContext): Promise<string> {
 /** The admin holds the `TreasuryCap<FLASH>` (minted+transferred to owner at init). */
 async function findTreasuryCap(ctx: FunctionalContext): Promise<string> {
   const capType = `0x2::coin::TreasuryCap<${ctx.packageId}::flash::FLASH>`;
-  const owned = await ctx.client.getOwnedObjects({
+  const { objects } = await ctx.client.core.listOwnedObjects({
     owner: ctx.adminAddress,
-    filter: { StructType: capType },
-    options: { showType: true },
+    type: capType,
+    include: { json: true },
   });
-  const id = owned.data[0]?.data?.objectId;
+  const id = objects[0]?.objectId;
   if (!id)
     throw new Error("functional: admin does not hold the FLASH TreasuryCap");
   return id;
@@ -142,7 +117,7 @@ async function send(
   await ctx.client.core.waitForTransaction({ result: res });
 }
 
-export async function attack(ctx: FunctionalContext): Promise<void> {
+export async function functional(ctx: FunctionalContext): Promise<void> {
   const lenderId = await findFlashLender(ctx);
   const treasuryId = await findTreasuryCap(ctx);
 
@@ -172,5 +147,3 @@ export async function attack(ctx: FunctionalContext): Promise<void> {
   await send(ctx, wdTx, "withdraw");
 }
 
-/** Readable alias — the confirmer runner only ever calls `attack`. */
-export const functional = attack;

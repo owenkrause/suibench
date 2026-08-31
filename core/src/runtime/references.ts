@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import type { ReferenceLibrary } from "./agent.js";
+import type { ReferenceLibrary } from "./loop.js";
 
 export interface ReferenceEntry {
   name: string;

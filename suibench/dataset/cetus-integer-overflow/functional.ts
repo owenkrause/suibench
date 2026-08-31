@@ -21,16 +21,11 @@ const PAYMENT = 5n; // == required_payment for this honest deposit.
 // amount = L << 128 : the Q128.128 liquidity notional (zero fractional part).
 const AMOUNT = LIQUIDITY << 128n;
 
-interface ObjectChange {
-  type: string;
-  objectType?: string;
-  objectId?: string;
-}
-
-interface TxPage {
-  data: { objectChanges?: ObjectChange[] | null }[];
-  hasNextPage: boolean;
-  nextCursor?: string | null;
+interface CreatedObject {
+  readonly id: string;
+  readonly type: string;
+  readonly digest: string;
+  readonly checkpoint: bigint;
 }
 
 interface AttackContext {
@@ -43,11 +38,9 @@ interface AttackContext {
       }) => Promise<unknown>;
       waitForTransaction: (input: { result: unknown }) => Promise<unknown>;
     };
-    queryTransactionBlocks(input: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<TxPage>;
+  };
+  chain: {
+    findCreatedObjects(sender: string): Promise<readonly CreatedObject[]>;
   };
   packageId: string;
   attacker: unknown;
@@ -63,33 +56,17 @@ async function findPool(ctx: AttackContext): Promise<string> {
     ctx.attackerAddress,
     ctx.userAddress,
   ]) {
-    let cursor: string | null | undefined;
-    do {
-      const page = await ctx.client.queryTransactionBlocks({
-        filter: { FromAddress: owner },
-        options: { showObjectChanges: true },
-        cursor,
-      });
-      for (const tx of page.data) {
-        for (const change of tx.objectChanges ?? []) {
-          if (
-            change.type === "created" &&
-            change.objectType === want &&
-            change.objectId
-          ) {
-            return change.objectId;
-          }
-        }
-      }
-      cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-    } while (cursor);
+    const pool = (await ctx.chain.findCreatedObjects(owner)).find(
+      (object) => object.type === want,
+    );
+    if (pool) return pool.id;
   }
   throw new Error(
     `functional: could not locate shared Pool for package ${ctx.packageId}`,
   );
 }
 
-export async function attack(ctx: AttackContext): Promise<void> {
+export async function functional(ctx: AttackContext): Promise<void> {
   const poolId = await findPool(ctx);
 
   const tx = new Transaction();
@@ -111,4 +88,3 @@ export async function attack(ctx: AttackContext): Promise<void> {
   await ctx.client.core.waitForTransaction({ result: res });
 }
 
-export const functional = attack;

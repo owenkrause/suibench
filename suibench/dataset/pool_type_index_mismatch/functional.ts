@@ -11,23 +11,13 @@
 // no VAL.
 import { Transaction } from "@mysten/sui/transactions";
 
+interface CreatedObject {
+  readonly id: string;
+  readonly type: string;
+}
+
 interface FunctionalContext {
   client: {
-    queryTransactionBlocks(i: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: {
-        objectChanges?: {
-          type: string;
-          objectType?: string;
-          objectId?: string;
-        }[];
-      }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
     core: {
       signAndExecuteTransaction: (i: {
         transaction: Transaction;
@@ -36,6 +26,9 @@ interface FunctionalContext {
       }) => Promise<{ $kind?: string }>;
       waitForTransaction: (i: { result: unknown }) => Promise<unknown>;
     };
+  };
+  chain: {
+    findCreatedObjects(sender: string): Promise<readonly CreatedObject[]>;
   };
   packageId: string;
   attacker: unknown;
@@ -50,29 +43,16 @@ async function findSharedByPrefix(
   fromAddress: string,
   typePrefix: string,
 ): Promise<string> {
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: fromAddress },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data)
-      for (const c of tx.objectChanges ?? [])
-        if (
-          c.type === "created" &&
-          c.objectType?.startsWith(typePrefix) &&
-          c.objectId
-        )
-          return c.objectId;
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
+  const object = (await ctx.chain.findCreatedObjects(fromAddress)).find(
+    (created) => created.type.startsWith(typePrefix),
+  );
+  if (object) return object.id;
   throw new Error(
     `functional: could not find shared object of type ${typePrefix}`,
   );
 }
 
-export async function attack(ctx: FunctionalContext): Promise<void> {
+export async function functional(ctx: FunctionalContext): Promise<void> {
   const CHEAP = `${ctx.packageId}::cheap::CHEAP`;
   const storageId = await findSharedByPrefix(
     ctx,
@@ -110,5 +90,3 @@ export async function attack(ctx: FunctionalContext): Promise<void> {
   await ctx.client.core.waitForTransaction({ result: res });
 }
 
-/** Readable alias — the confirmer runner only ever calls `attack`. */
-export const functional = attack;

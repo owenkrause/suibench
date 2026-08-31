@@ -13,26 +13,16 @@
 // fixed supply is what makes the check's "attacker captured the pool" predicate
 // sound (see ./check.ts).
 import { Transaction } from "@mysten/sui/transactions";
-import type { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
 import type { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 
+interface CreatedObject {
+  readonly id: string;
+  readonly type: string;
+}
+
 interface SetupContext {
-  client: SuiJsonRpcClient & {
-    queryTransactionBlocks(input: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: {
-        objectChanges?: {
-          type: string;
-          objectType?: string;
-          objectId?: string;
-        }[];
-      }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
+  client: SuiGrpcClient & {
     core: {
       signAndExecuteTransaction: (input: {
         transaction: Transaction;
@@ -42,6 +32,9 @@ interface SetupContext {
       waitForTransaction: (input: { result: unknown }) => Promise<unknown>;
     };
   };
+  chain: {
+    findCreatedObjects(sender: string): Promise<readonly CreatedObject[]>;
+  };
   packageId: string;
   attacker: Ed25519Keypair;
   attackerAddress: string;
@@ -49,33 +42,17 @@ interface SetupContext {
 }
 
 // The package is published by the admin account, so the one-shot mint-cap
-// objects created in each coin module's `init` show up as `created` object
-// changes on an admin-sent transaction. Scan for them by type.
+// objects created in each coin module's `init` are recorded by chain discovery
+// for the admin sender. Find them by type.
 async function findCreated(
   ctx: SetupContext,
   fromAddress: string,
   typePrefix: string,
 ): Promise<string> {
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: fromAddress },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data) {
-      for (const change of tx.objectChanges ?? []) {
-        if (
-          change.type === "created" &&
-          change.objectType?.startsWith(typePrefix) &&
-          change.objectId
-        ) {
-          return change.objectId;
-        }
-      }
-    }
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
+  const object = (await ctx.chain.findCreatedObjects(fromAddress)).find(
+    (created) => created.type.startsWith(typePrefix),
+  );
+  if (object) return object.id;
   throw new Error(
     `setup: could not find a created object of type ${typePrefix}`,
   );

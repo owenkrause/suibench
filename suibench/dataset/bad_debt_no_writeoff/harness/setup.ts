@@ -9,39 +9,22 @@
 // the rate reads 1.0/cToken while only 600 ASSET is actually redeemable. First-mover
 // wins the bank run; the last redeemer is stranded.
 import { Transaction } from "@mysten/sui/transactions";
-import type { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
 import type { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 
 interface SetupContext {
-  client: SuiJsonRpcClient & {
-    getOwnedObjects(input: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
-    queryTransactionBlocks(i: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: {
-        objectChanges?: {
-          type: string;
-          objectType?: string;
-          objectId?: string;
-        }[];
-      }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
-    core: {
-      signAndExecuteTransaction: (i: {
-        transaction: Transaction;
-        signer: unknown;
-        include?: unknown;
-      }) => Promise<{ $kind?: string }>;
-      waitForTransaction: (i: { result: unknown }) => Promise<unknown>;
-    };
+  client: SuiGrpcClient;
+  chain: {
+    findCreatedObjects(
+      sender: string,
+    ): Promise<
+      readonly {
+        id: string;
+        type: string;
+        digest: string;
+        checkpoint: bigint;
+      }[]
+    >;
   };
   packageId: string;
   admin: Ed25519Keypair;
@@ -52,38 +35,53 @@ interface SetupContext {
 
 async function findPool(ctx: SetupContext): Promise<string> {
   const prefix = `${ctx.packageId}::lending_pool::Pool`;
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: ctx.adminAddress },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data)
-      for (const c of tx.objectChanges ?? [])
-        if (c.type === "created" && c.objectType === prefix && c.objectId)
-          return c.objectId;
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
+  const pool = (await ctx.chain.findCreatedObjects(ctx.adminAddress)).find(
+    (object) => object.type === prefix,
+  );
+  if (pool) return pool.id;
   throw new Error("setup: Pool not found");
 }
 
 export async function setup(ctx: SetupContext): Promise<void> {
   const ASSET = `${ctx.packageId}::asset::ASSET`;
-  const owned = await ctx.client.getOwnedObjects({
+  const { objects } = await ctx.client.core.listOwnedObjects({
     owner: ctx.adminAddress,
-    filter: { StructType: `0x2::coin::Coin<${ASSET}>` },
-    options: { showType: true },
+    type: `0x2::coin::Coin<${ASSET}>`,
+    include: { json: true },
   });
-  const adminCoin = owned.data[0]?.data?.objectId;
+  const adminCoin = objects[0]?.objectId;
   if (!adminCoin) throw new Error("setup: admin holds no ASSET");
   const pool = await findPool(ctx);
 
+  // The deployer holds the BorrowCap (minted to them at init) — borrowing is
+  // now gated, so the seed loan below is originated with it.
+  const { objects: caps } = await ctx.client.core.listOwnedObjects({
+    owner: ctx.adminAddress,
+    type: `${ctx.packageId}::lending_pool::BorrowCap`,
+    include: { json: true },
+  });
+  const borrowCap = caps[0]?.objectId;
+  if (!borrowCap) throw new Error("setup: admin holds no BorrowCap");
+
+  // The deployer separately holds the DefaultCap (minted to them at init,
+  // distinct from BorrowCap) — recording a default is now gated, so the
+  // seed default below is originated with it.
+  const { objects: defaultCaps } = await ctx.client.core.listOwnedObjects({
+    owner: ctx.adminAddress,
+    type: `${ctx.packageId}::lending_pool::DefaultCap`,
+    include: { json: true },
+  });
+  const defaultCap = defaultCaps[0]?.objectId;
+  if (!defaultCap) throw new Error("setup: admin holds no DefaultCap");
+
   const tx = new Transaction();
   tx.setSender(ctx.adminAddress);
-  const [depA, depB] = tx.splitCoins(tx.object(adminCoin), [
+  // depA/depB seed the two equal cToken shares; atkColl funds the attacker with
+  // liquid ASSET to post as collateral for the borrow-side exploit.
+  const [depA, depB, atkColl] = tx.splitCoins(tx.object(adminCoin), [
     tx.pure.u64(500),
     tx.pure.u64(500),
+    tx.pure.u64(700),
   ]);
   const receiptA = tx.moveCall({
     target: `${ctx.packageId}::lending_pool::deposit`,
@@ -96,13 +94,13 @@ export async function setup(ctx: SetupContext): Promise<void> {
   // Drive the pool underwater: borrow 400 out, then default it without writing it off.
   const borrowed = tx.moveCall({
     target: `${ctx.packageId}::lending_pool::borrow`,
-    arguments: [tx.object(pool), tx.pure.u64(400)],
+    arguments: [tx.object(borrowCap), tx.object(pool), tx.pure.u64(400)],
   });
   tx.moveCall({
     target: `${ctx.packageId}::lending_pool::record_default`,
-    arguments: [tx.object(pool), tx.pure.u64(400)],
+    arguments: [tx.object(defaultCap), tx.object(pool), tx.pure.u64(400)],
   });
-  tx.transferObjects([receiptA], ctx.attackerAddress);
+  tx.transferObjects([receiptA, atkColl], ctx.attackerAddress);
   tx.transferObjects([receiptB], ctx.userAddress);
   tx.transferObjects([borrowed], ctx.adminAddress);
   const res = await ctx.client.core.signAndExecuteTransaction({

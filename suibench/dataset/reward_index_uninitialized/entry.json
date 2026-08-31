@@ -1,4 +1,5 @@
 {
+  "id": "chal_7e04e939",
   "version": 1,
   "vulns": [
     {
@@ -6,6 +7,7 @@
       "module": "spool",
       "title": "stake sets a new account's last_index to 0 instead of the current reward_index, so a fresh staker claims rewards accrued before they staked",
       "severity": "critical",
+      "harm": "state",
       "root_cause": "Rewards are distributed with the standard accumulator pattern: `add_reward` bumps the pool's monotonic `reward_index` (reward-per-staked-unit accrued so far), and `claim` pays `staked * (reward_index - last_index)`, where `last_index` is the account's checkpoint of the index AT THE TIME IT STAKED. For this to be correct, a new account must checkpoint `last_index = spool.reward_index` at stake time, so it only earns rewards accrued AFTER it joined. `stake` instead hardcodes `last_index: 0`. So an account that stakes long after the pool has been accruing rewards computes `staked * (reward_index - 0)` at claim — collecting a share of EVERY reward the pool has ever received, including the entire history before it staked. An attacker stakes a small amount into a long-lived, reward-rich pool and immediately claims a payout far exceeding its fair share, draining rewards owed to the honest long-term stakers. The fix is to initialize `last_index` to the current `reward_index` when the account is created. This mirrors the Scallop Spool incident (new spool accounts never checkpointed, so a ~0.2 SUI stake claimed rewards accrued since pool inception).",
       "exploit": true,
       "patch": true

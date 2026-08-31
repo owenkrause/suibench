@@ -1,6 +1,6 @@
 // The patch-mode driver — its own vertical (not a `bench` axis). Per entry: run
-// the patch policy → overlay the model's sources → grade on real Docker via the
-// PatchGraderBoundary → PatchGrade; roll up with passKPatch + aggregatePatchCorpus.
+// the patch agent → overlay the model's sources → grade on real Docker via the
+// PatchGraderBoundary → PatchRunScore; roll up with passKPatch + aggregatePatchCorpus.
 // Only entries with a `functional.ts` are patch-gradable. InfraError isolates to
 // the entry (like `bench`), so one bad boot never voids the run.
 import {
@@ -20,9 +20,13 @@ import {
 } from "core";
 import {
   AgentError,
+  RefusalError,
   CostMeter as CostMeterCtor,
+  type AgentConversation,
   type CostMeter,
   type CostTotals,
+  type StopKind,
+  type TrajectorySink,
 } from "core/runtime";
 import {
   loadEntry,
@@ -35,22 +39,30 @@ import { InfraError } from "../adapters/confirmer.js";
 import type { SandboxManager } from "../adapters/sandbox.js";
 import { boundedMap } from "../util/bounded.js";
 import type { Harness } from "./driver.js";
-
-/** Produces the model's patched sources for one entry (basename paths). */
-export interface PatchPolicy {
-  collectPatch(): Promise<MoveFile[]>;
-}
+import type { PatchTrajectory } from "./trajectory.js";
 
 export interface PatchDeps {
-  /** Builds the patch policy for one entry's Observation (a factory, so pass@k
-   *  re-runs get a fresh policy each attempt). */
-  patchFor: (entry: DatasetEntry, observation: Observation, meter?: CostMeter) => PatchPolicy;
+  /** Runs the patch agent over one entry's Observation and returns its patched
+   *  sources (basename paths) plus the loop's conversation/stopReason/cost.
+   *  Called once per attempt, so pass@k re-runs get a fresh run each time. */
+  patchFor: (
+    entry: DatasetEntry,
+    observation: Observation,
+    meter?: CostMeter,
+  ) => Promise<{
+    sources: MoveFile[];
+    conversation: AgentConversation;
+    stopReason: StopKind;
+    cost: CostTotals;
+  }>;
   manager: SandboxManager;
-  image?: string;
   /** Max entries graded concurrently (default 1). pass@k stays sequential. */
   concurrency?: number;
   /** Called once per attempted entry with its accumulated cost. */
   onEntryCost?: (target: string, cost: CostTotals) => void;
+  /** Persists one Trajectory per graded attempt. A save failure is logged and
+   *  swallowed — it must never fail the run it's recording. */
+  sink: TrajectorySink;
 }
 
 // Static patch: model writes the fix blind from inlined source + the known root
@@ -104,26 +116,50 @@ async function patchEntryOnce(
   harness: Harness,
   deps: PatchDeps,
   meter?: CostMeter,
+  attemptIndex = 0,
 ): Promise<PatchRunScore> {
   const observation: Observation = {
     source: loadSource(entry),
     tools: patchTools(harness),
     env,
   };
-  const patched = await deps.patchFor(entry, observation, meter).collectPatch();
+  const { sources, conversation, stopReason, cost } = await deps.patchFor(entry, observation, meter);
   const vulnIds = entry.manifest.vulns.map((v) => v.id);
-  if (patched.length === 0) return noPatch(entry, vulnIds);
 
-  const patchedMount = overlayPatch(loadSource(entry), patched);
-  const check = await loadCheck(entry);
-  const boundary = makePatchGraderBoundary({
-    entry,
-    patchedMount,
-    check,
-    manager: deps.manager,
-    image: deps.image,
-  });
-  return gradePatch(entry.target, vulnIds, boundary);
+  let score: PatchRunScore;
+  if (sources.length === 0) {
+    score = noPatch(entry, vulnIds);
+  } else {
+    const patchedMount = overlayPatch(loadSource(entry), sources);
+    const check = await loadCheck(entry);
+    const boundary = makePatchGraderBoundary({
+      entry,
+      patchedMount,
+      check,
+      manager: deps.manager,
+    });
+    score = await gradePatch(entry.target, vulnIds, boundary);
+  }
+
+  try {
+    const trajectory: PatchTrajectory = {
+      schemaVersion: 1,
+      id: `${entry.target}-${attemptIndex}`,
+      env,
+      conversation,
+      stopReason,
+      cost,
+      output: sources,
+      score,
+    };
+    await deps.sink.save(trajectory);
+  } catch (err) {
+    console.error(
+      `[patch] ${entry.target}: trajectory save failed — ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  return score;
 }
 
 export async function benchPatch(
@@ -143,9 +179,17 @@ export async function benchPatch(
   const gradable = entryDirs
     .map(loadEntry)
     .filter((entry) => {
-      if (entry.functionalPath) return true;
-      console.error(`[patch] ${entry.target}: SKIPPED — no functional.ts (not patch-gradable)`);
-      return false;
+      if (!entry.functionalPath) {
+        console.error(`[patch] ${entry.target}: SKIPPED — no functional.ts (not patch-gradable)`);
+        return false;
+      }
+      // `loadCheck` throws for a detect-tier entry, and that throw escapes
+      // boundedMap and rejects the whole corpus run. Skip loudly instead.
+      if (entry.tier !== "confirmed") {
+        console.error(`[patch] ${entry.target}: SKIPPED — detect-tier (no check.ts); ships functional.ts but is not patch-gradable`);
+        return false;
+      }
+      return true;
     });
   if (gradable.length === 0) {
     throw new Error("no patch-gradable entries matched (functional.ts required)");
@@ -153,14 +197,20 @@ export async function benchPatch(
 
   const outcomes = await boundedMap(gradable, deps.concurrency ?? 1, async (entry): Promise<Outcome> => {
     const meter = new CostMeterCtor();
+    let attemptIndex = 0;
     try {
       try {
         const score = await passKPatch(k, entry.target, () =>
-          patchEntryOnce(entry, env, harness, deps, meter),
+          patchEntryOnce(entry, env, harness, deps, meter, attemptIndex++),
         );
         return { ok: true, score };
       } catch (err) {
-        if (!(err instanceof InfraError) && !(err instanceof AgentError)) throw err;
+        if (
+          !(err instanceof InfraError) &&
+          !(err instanceof AgentError) &&
+          !(err instanceof RefusalError)
+        )
+          throw err;
         console.error(`[patch] ${entry.target}: ERRORED — excluded from the rate, rerun to complete`);
         return {
           ok: false,

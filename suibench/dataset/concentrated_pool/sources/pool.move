@@ -1,8 +1,8 @@
 /// Concentrated-liquidity pool for an arbitrary token pair (A, B).
 ///
-/// Liquidity providers choose a price range and deposit tokens proportional
-/// to the current sqrt-price.  On withdrawal the provider receives their
-/// pro-rata share of pool reserves.
+/// Liquidity providers choose a price range and deposit tokens derived from the
+/// current sqrt-price.  A position is a custodial claim: on withdrawal the
+/// provider reclaims exactly the tokens they deposited for it.
 module challenge::pool {
     use sui::coin::{Self, Coin};
     use sui::balance::{Self, Balance};
@@ -15,6 +15,7 @@ module challenge::pool {
     const E_POOL_EMPTY: u64 = 3;
     const E_SLIPPAGE: u64 = 4;
     const E_INVALID_PRICE_RANGE: u64 = 5;
+    const E_WRONG_POOL: u64 = 6;
 
     /// Q64.64 representation of 1.0.
     const Q64: u128 = 1 << 64;
@@ -30,13 +31,16 @@ module challenge::pool {
         total_liquidity: u128,  // aggregate liquidity across all positions
     }
 
-    /// A provider's liquidity position.
+    /// A provider's liquidity position.  Records the tokens deposited for it so
+    /// that removal can only ever return that exact stake.
     public struct Position has key, store {
         id: UID,
         pool_id: ID,
         liquidity: u128,
         sqrt_price_lower: u128, // lower bound of the position's price range
         sqrt_price_upper: u128, // upper bound
+        deposited_a: u64,       // token A escrowed for this position
+        deposited_b: u64,       // token B escrowed for this position
     }
 
     // ── Pool lifecycle ──────────────────────────────────────────
@@ -61,9 +65,8 @@ module challenge::pool {
     /// Add concentrated liquidity within [`sqrt_price_lower`, `sqrt_price_upper`].
     ///
     /// The required deposit of token A is derived from the concentrated-
-    /// liquidity formula; the caller must supply at least that amount.
-    /// Token B is accepted as-is (no computed minimum in this simplified
-    /// implementation).
+    /// liquidity formula; the caller must supply at least that amount.  The
+    /// tokens actually supplied are escrowed against the returned position.
     public fun add_liquidity<A, B>(
         pool: &mut Pool<A, B>,
         liquidity: u128,
@@ -82,9 +85,11 @@ module challenge::pool {
             sqrt_price_lower,
             sqrt_price_upper,
         );
-        assert!(coin::value(&coin_a) >= required_a, E_INSUFFICIENT_DEPOSIT);
+        let deposited_a = coin::value(&coin_a);
+        let deposited_b = coin::value(&coin_b);
+        assert!(deposited_a >= required_a, E_INSUFFICIENT_DEPOSIT);
 
-        // Accept the deposited tokens.
+        // Escrow the deposited tokens.
         balance::join(&mut pool.balance_a, coin::into_balance(coin_a));
         balance::join(&mut pool.balance_b, coin::into_balance(coin_b));
         pool.total_liquidity = pool.total_liquidity + liquidity;
@@ -95,11 +100,12 @@ module challenge::pool {
             liquidity,
             sqrt_price_lower,
             sqrt_price_upper,
+            deposited_a,
+            deposited_b,
         }
     }
 
-    /// Burn a position and withdraw the provider's pro-rata share of both
-    /// reserve balances.
+    /// Burn a position and reclaim exactly the tokens escrowed for it.
     public fun remove_liquidity<A, B>(
         pool: &mut Pool<A, B>,
         position: Position,
@@ -107,28 +113,23 @@ module challenge::pool {
     ): (Coin<A>, Coin<B>) {
         let Position {
             id,
-            pool_id: _,
+            pool_id,
             liquidity,
             sqrt_price_lower: _,
             sqrt_price_upper: _,
+            deposited_a,
+            deposited_b,
         } = position;
+        // A position may only be redeemed against the pool that minted it.
+        assert!(pool_id == object::id(pool), E_WRONG_POOL);
         object::delete(id);
         assert!(pool.total_liquidity > 0, E_POOL_EMPTY);
-
-        // Pro-rata share of reserves.
-        let bal_a = (balance::value(&pool.balance_a) as u256);
-        let bal_b = (balance::value(&pool.balance_b) as u256);
-        let total = (pool.total_liquidity as u256);
-        let liq   = (liquidity as u256);
-
-        let amount_a = ((liq * bal_a / total) as u64);
-        let amount_b = ((liq * bal_b / total) as u64);
 
         pool.total_liquidity = pool.total_liquidity - liquidity;
 
         (
-            coin::take(&mut pool.balance_a, amount_a, ctx),
-            coin::take(&mut pool.balance_b, amount_b, ctx),
+            coin::take(&mut pool.balance_a, deposited_a, ctx),
+            coin::take(&mut pool.balance_b, deposited_b, ctx),
         )
     }
 
@@ -191,14 +192,11 @@ module challenge::pool {
         // Denominator: sqrt_upper * sqrt_lower
         let denominator = math_utils::full_mul_u128(sqrt_price_upper, sqrt_price_lower);
 
-        if (overflowed) {
-            // Precision fallback — skip the extra shift.
-            let result = numerator_base / denominator;
-            (result as u64)
-        } else {
-            let result = math_utils::div_round(numerator, denominator, true);
-            (result as u64)
-        }
+        // A numerator too wide to scale means the price range is out of the
+        // representable band; reject rather than fall back to a wrong scale.
+        assert!(!overflowed, E_INVALID_PRICE_RANGE);
+        let result = math_utils::div_round(numerator, denominator, true);
+        (result as u64)
     }
 
     // ── View functions ──────────────────────────────────────────

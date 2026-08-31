@@ -3,25 +3,11 @@
 // attacker is NOT funded with any pool liquidity — any ASSET they end up holding is
 // drained from the pool (the seeded liquidity), so the check measures true theft.
 import { Transaction } from "@mysten/sui/transactions";
-import type { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
 import type { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 
 interface SetupContext {
-  client: SuiJsonRpcClient & {
-    getOwnedObjects(input: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
-    core: {
-      signAndExecuteTransaction: (i: {
-        transaction: Transaction;
-        signer: unknown;
-        include?: unknown;
-      }) => Promise<{ $kind?: string }>;
-      waitForTransaction: (i: { result: unknown }) => Promise<unknown>;
-    };
-  };
+  client: SuiGrpcClient;
   packageId: string;
   admin: Ed25519Keypair;
   adminAddress: string;
@@ -30,12 +16,12 @@ interface SetupContext {
 
 export async function setup(ctx: SetupContext): Promise<void> {
   const ASSET = `${ctx.packageId}::asset::ASSET`;
-  const owned = await ctx.client.getOwnedObjects({
+  const { objects } = await ctx.client.core.listOwnedObjects({
     owner: ctx.adminAddress,
-    filter: { StructType: `0x2::coin::Coin<${ASSET}>` },
-    options: { showType: true },
+    type: `0x2::coin::Coin<${ASSET}>`,
+    include: { json: true },
   });
-  const adminCoin = owned.data[0]?.data?.objectId;
+  const adminCoin = objects[0]?.objectId;
   if (!adminCoin) throw new Error("setup: admin holds no ASSET");
 
   const tx = new Transaction();

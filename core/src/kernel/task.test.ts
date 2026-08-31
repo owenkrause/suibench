@@ -22,8 +22,10 @@ function run(m: Partial<ScoreMetrics>): RunScore {
       findings_total: 0,
       true_positives: 0,
       false_positives: 0,
+      unattributed_findings: 0,
       recall: 0,
       precision: null,
+      attribution_rate: null,
       severity_accuracy: null,
       severity_correct: 0,
       severity_total: 0,
@@ -114,11 +116,38 @@ describe("twinPair — perturbation gap", () => {
 describe("counterfactual — wraps attribute()", () => {
   it("delegates to the pure attribution set-logic", () => {
     const a = counterfactual([
-      { exploitId: "F1", base: true, perLabel: { x: false, y: true } },
-      { exploitId: "F2", base: false, perLabel: {} },
+      {
+        exploitId: "F1",
+        base: { witnesses: ["x", "y"] },
+        perLabel: { x: { witnesses: ["y"] }, y: { witnesses: ["x", "y"] } },
+      },
+      { exploitId: "F2", base: { witnesses: [] }, perLabel: {} },
     ]);
-    expect(a.perExploit["F1"]).toEqual(["x"]);
-    expect(a.perExploit["F2"]).toEqual([]);
+    expect(a.perExploit["F1"]).toEqual({ kind: "attributed", labels: ["x"] });
+    expect(a.perExploit["F2"]).toEqual({ kind: "refuted", labels: [] });
     expect(a.confirmedLabels).toEqual(["x"]);
+  });
+
+  it("historical tripwire shape: a single-witness base with an emptying own-patch is attributed to that witness only", () => {
+    const a = counterfactual([
+      {
+        exploitId: "F3",
+        base: { witnesses: ["collateral-release-no-repay"] },
+        perLabel: {
+          "collateral-release-no-repay": { witnesses: [] },
+        },
+      },
+    ]);
+    expect(a.perExploit["F3"]).toEqual({
+      kind: "attributed",
+      labels: ["collateral-release-no-repay"],
+    });
+  });
+
+  it("refuted: an empty base witness set needs no patch results", () => {
+    const a = counterfactual([
+      { exploitId: "F4", base: { witnesses: [] }, perLabel: {} },
+    ]);
+    expect(a.perExploit["F4"]).toEqual({ kind: "refuted", labels: [] });
   });
 });

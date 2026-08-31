@@ -14,69 +14,33 @@
 // Exports `attack(ctx)` (aliased `functional`) with the confirmer's AttackContext
 // shape — the runner only ever calls `attack`.
 import { Transaction } from "@mysten/sui/transactions";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
+import type { Signer } from "@mysten/sui/cryptography";
+interface NativeChain {
+  findCreatedObjects(sender: string): Promise<
+    readonly { id: string; type: string; digest: string; checkpoint: bigint }[]
+  >;
+}
+
 
 interface FunctionalContext {
-  client: {
-    getOwnedObjects(input: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
-    queryTransactionBlocks(input: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: {
-        objectChanges?: {
-          type: string;
-          objectType?: string;
-          objectId?: string;
-        }[];
-      }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
-    core: {
-      signAndExecuteTransaction: (input: {
-        transaction: Transaction;
-        signer: unknown;
-        include?: unknown;
-      }) => Promise<{ $kind?: string; FailedTransaction?: unknown }>;
-      waitForTransaction: (input: { result: unknown }) => Promise<unknown>;
-    };
-  };
+  client: SuiGrpcClient;
+  chain: NativeChain;
   packageId: string;
-  attacker: unknown;
+  attacker: Signer;
   attackerAddress: string;
-  admin: unknown;
+  admin: Signer;
   adminAddress: string;
-  user: unknown;
+  user: Signer;
   userAddress: string;
 }
 
 async function findPool(ctx: FunctionalContext): Promise<string> {
   const poolType = `${ctx.packageId}::reward_pool::RewardPool`;
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: ctx.adminAddress },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data) {
-      for (const change of tx.objectChanges ?? []) {
-        if (
-          change.type === "created" &&
-          change.objectType === poolType &&
-          change.objectId
-        ) {
-          return change.objectId;
-        }
-      }
-    }
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
+  const created = await ctx.chain.findCreatedObjects(ctx.adminAddress);
+  for (const object of created) {
+    if (object.type === poolType) return object.id;
+  }
   throw new Error("functional: could not locate the shared RewardPool");
 }
 
@@ -86,19 +50,18 @@ async function findOne(
   structType: string,
   label: string,
 ): Promise<string> {
-  const owned = await ctx.client.getOwnedObjects({
-    owner,
-    filter: { StructType: structType },
-    options: { showType: true },
+  const owned = await ctx.client.core.listOwnedObjects({
+    owner: owner,
+    type: structType,
   });
-  const id = owned.data[0]?.data?.objectId;
+  const id = owned.objects[0]?.objectId;
   if (!id) throw new Error(`functional: ${label} not found`);
   return id;
 }
 
 async function run(
   ctx: FunctionalContext,
-  signer: unknown,
+  signer: Signer,
   build: (tx: Transaction) => void,
   sender: string,
   what: string,
@@ -119,7 +82,7 @@ async function run(
 const COIN = (ctx: FunctionalContext) =>
   `0x2::coin::Coin<${ctx.packageId}::asset::ASSET>`;
 
-export async function attack(ctx: FunctionalContext): Promise<void> {
+export async function functional(ctx: FunctionalContext): Promise<void> {
   const poolId = await findPool(ctx);
 
   // 1) attacker (first depositor): deposit 100,000 ASSET -> nonzero shares.
@@ -189,5 +152,3 @@ export async function attack(ctx: FunctionalContext): Promise<void> {
   );
 }
 
-/** Readable alias — the confirmer runner only ever calls `attack`. */
-export const functional = attack;

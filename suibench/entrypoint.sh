@@ -2,14 +2,14 @@
 set -euo pipefail
 
 TARGET_CONTRACT="${TARGET_CONTRACT:?TARGET_CONTRACT env var must be set}"
-NETWORK="${NETWORK:-devnet}"
+NETWORK="${NETWORK:-localnet}"
 # Seconds to wait for the localnet RPC / faucet before giving up. Bumped from 60
 # to 180 because under host CPU contention (many localnets booting at once) a
 # single validator's first-checkpoint production can exceed 60s — the old hard
 # cap turned a transient slow boot into a hard failure. Override if needed.
 READY_TIMEOUT="${SUI_BOOT_READY_TIMEOUT_SECS:-180}"
 
-# ── Mainnet mode: no devnet, no deploy, just write context and go ──
+# ── Mainnet mode: no localnet, no deploy, just write context and go ──
 if [ "$NETWORK" = "mainnet" ]; then
   PACKAGE_ID="${PACKAGE_ID:?PACKAGE_ID env var must be set for mainnet}"
   RPC_URL="https://fullnode.mainnet.sui.io:443"
@@ -47,14 +47,18 @@ fi
 # (observed ~40-60% single-boot failure under load). The failure is transient and
 # self-terminating, so we supervise the boot and relaunch until RPC + faucet are
 # both up. Overridable cap via SUI_BOOT_MAX_ATTEMPTS (failed attempts cost ~2s).
-echo "=== Starting Sui devnet ==="
+echo "=== Starting Sui localnet ==="
 MAX_ATTEMPTS="${SUI_BOOT_MAX_ATTEMPTS:-20}"
 
 rpc_ready() {
-  curl -s -X POST http://127.0.0.1:9000 \
-    -H 'Content-Type: application/json' \
-    -d '{"jsonrpc":"2.0","method":"sui_getLatestCheckpointSequenceNumber","id":1}' \
-    2>/dev/null | grep -q '"result"'
+  (cd "${SUIBENCH_SDK_DIR:-/workspace/suibench}" && node --input-type=module -e '
+    import { SuiGrpcClient } from "@mysten/sui/grpc";
+    const client = new SuiGrpcClient({
+      network: "localnet",
+      baseUrl: "http://127.0.0.1:9000",
+    });
+    await client.ledgerService.getServiceInfo({});
+  ') >/dev/null 2>&1
 }
 faucet_ready() {
   case "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9123 2>/dev/null)" in
@@ -132,6 +136,16 @@ sleep 3
 echo "=== Publishing contract: $TARGET_CONTRACT ==="
 sui client switch --address "$ADMIN_ADDRESS" 2>/dev/null
 
+BENCHMARK_START_CHECKPOINT=$(cd "${SUIBENCH_SDK_DIR:-/workspace/suibench}" && node --input-type=module -e '
+  import { SuiGrpcClient } from "@mysten/sui/grpc";
+  const client = new SuiGrpcClient({
+    network: "localnet",
+    baseUrl: "http://127.0.0.1:9000",
+  });
+  const { response } = await client.ledgerService.getServiceInfo({});
+  process.stdout.write(String(response.checkpointHeight));
+')
+
 PUBLISH_OUTPUT=$(sui client test-publish "/workspace/${TARGET_CONTRACT}" \
   --skip-dependency-verification \
   --publish-unpublished-deps \
@@ -165,6 +179,7 @@ cat > /workspace/context.json <<CONTEXT
   "adminAddress": "$ADMIN_ADDRESS",
   "attackerAddress": "$ATTACKER_ADDRESS",
   "userAddress": "$USER_ADDRESS",
+  "benchmarkStartCheckpoint": "$BENCHMARK_START_CHECKPOINT",
   "adminKeyPair": "$ADMIN_KEY",
   "attackerKeyPair": "$ATTACKER_KEY",
   "userKeyPair": "$USER_KEY"

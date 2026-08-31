@@ -21,25 +21,11 @@
 // check measures true NET profit. The fixed supply is what makes the check's
 // "attacker captured the victim's deposit" predicate sound (see ./check.ts).
 import { Transaction } from "@mysten/sui/transactions";
-import type { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
 import type { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 
 interface SetupContext {
-  client: SuiJsonRpcClient & {
-    getOwnedObjects(input: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
-    core: {
-      signAndExecuteTransaction: (input: {
-        transaction: Transaction;
-        signer: unknown;
-        include?: unknown;
-      }) => Promise<{ $kind?: string; FailedTransaction?: unknown }>;
-      waitForTransaction: (input: { result: unknown }) => Promise<unknown>;
-    };
-  };
+  client: SuiGrpcClient;
   packageId: string;
   attacker: Ed25519Keypair;
   attackerAddress: string;
@@ -54,12 +40,11 @@ async function findAdminObject(
   structType: string,
   label: string,
 ): Promise<string> {
-  const owned = await ctx.client.getOwnedObjects({
+  const owned = await ctx.client.core.listOwnedObjects({
     owner: ctx.adminAddress,
-    filter: { StructType: structType },
-    options: { showType: true },
+    type: structType,
   });
-  const id = owned.data[0]?.data?.objectId;
+  const id = owned.objects[0]?.objectId;
   if (!id) throw new Error(`setup: admin holds no ${label}`);
   return id;
 }

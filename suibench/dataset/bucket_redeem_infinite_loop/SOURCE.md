@@ -3,22 +3,22 @@
 Confirmed-tier availability/DoS entry (has `harness/`): the exploit is a gas-exhaustion /
 non-terminating-loop DoS on the redeem path. It is graded via the victim machinery
 (`CheckContext.victim` / `classifyVictimOutcome`): a designated victim redeem is submitted with a
-fixed gas budget, and `harness/check.ts` keys on `ctx.victim?.status === "gas_exhausted"` — the
+fixed gas budget, and `check.ts` keys on `ctx.victim?.status === "gas_exhausted"` — the
 loop specifically, NOT `!== "success"`. This is load-bearing: the fix turns an over-redeem into a
 clean `ENotEnoughToRedeem` abort (also non-success), so only gas-exhaustion distinguishes the bug
 (loop) from the patched abort.
 
 ## Grading gates
-- **gold-check** — `harness/solution.mts` borrows one bottle with debt D = 500 BUCK (< R); the
+- **gold-check** — `exploits/redeem-infinite-loop.ts` borrows one bottle with debt D = 500 BUCK (< R); the
   victim redeems R = 1000 BUCK > D, fully redeems the only bottle (debt → 0), and the zero-debt
   bottle is re-selected forever → `gas_exhausted` → confirmed.
-- **Gate A (benign)** — `harness/functional.mts` borrows one bottle with debt D = 2000 BUCK (≥ R);
+- **Gate A (benign)** — `functional.ts` borrows one bottle with debt D = 2000 BUCK (≥ R);
   the victim redeems R = 1000 BUCK ≤ D → valid partial redeem → `success` → NOT confirmed.
-- **Gate B (patch)** — `harness/patches/<label-slug>/bucket.move` breaks the loop when the selected
+- **Gate B (patch)** — `patches/redeem-infinite-loop/bucket.move` breaks the loop when the selected
   bottle's debt is 0; the over-redeem then hits `assert!(remaining == 0, ENotEnoughToRedeem)` →
   `abort` (not gas_exhausted) → NOT confirmed.
 
-Victim gas budget `SUIBENCH_VICTIM_GAS_BUDGET` is tuned so a valid redeem (functional) succeeds
+Victim gas budget `SUIXPLOIT_VICTIM_GAS_BUDGET` is tuned so a valid redeem (functional) succeeds
 but the loop reliably gas-exhausts.
 
 ## Vulnerability
@@ -97,4 +97,4 @@ but the loop reliably gas-exhausts.
   `public(friend)`) byte-faithfully; empty `[dependencies]`, `challenge = "0x0"`.
 - Builds clean with `sui move build --build-env mainnet` (lint warnings only: deprecated
   `sui::math::pow`, and unused-param warnings on the generic oracle stub — no errors). `build/`
-  removed, generated `Move.lock` kept.
+  and the generated `Move.lock` removed.

@@ -1,4 +1,5 @@
 {
+  "id": "chal_224c542b",
   "version": 1,
   "vulns": [
     {
@@ -6,9 +7,8 @@
       "module": "staking",
       "title": "Staking-time inflation via receipt merge",
       "severity": "high",
-      "root_cause": "merge_receipts sums the hours_staked of its two input receipts (hours1 + hours2). Because credited staking time is duplicated on every merge, an attacker can accumulate MIN_STAKE_HOURS of staking time far faster than real elapsed time — stake into several receipts, let a little time pass, update them, and merge — then call claim_rewards to withdraw the principal plus the loyalty reward long before having genuinely staked that long, draining rewards from the pool.",
-      "exploit": true,
-      "patch": true
+      "harm": "state",
+      "root_cause": "merge_receipts sums the hours_staked of its two input receipts (hours1 + hours2). Because credited staking time is duplicated on every merge, an attacker can accumulate MIN_STAKE_HOURS of staking time far faster than real elapsed time — stake into several receipts, let a little time pass, update them, and merge — then call claim_rewards to withdraw the principal plus the loyalty reward long before having genuinely staked that long, draining rewards from the pool. Detect-tier: the harm is temporal (claiming a reward before genuinely accruing the stake time), and a snapshot-pure oracle cannot distinguish an early merge-inflated claim from an honest full-term claim — both yield the identical +reward state delta — so this vuln is graded by detection, not on-chain confirmation."
     }
   ]
 }

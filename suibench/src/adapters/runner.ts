@@ -6,8 +6,10 @@
 // its own signer. The host reads committed state out-of-band after each phase.
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
+import { SimulationError } from "@mysten/sui/client";
+import { SuiGrpcClient, GrpcWebFetchTransport } from "@mysten/sui/grpc";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
+import { ChainDiscovery } from "./chain-discovery.js";
 
 const scriptFile = process.argv[2];
 const entryFn = process.argv[3] ?? "attack";
@@ -17,14 +19,26 @@ if (!scriptFile) {
 }
 
 const raw = JSON.parse(readFileSync("/workspace/context.json", "utf-8"));
-const client = new SuiJsonRpcClient({
-  url: "http://127.0.0.1:9000",
-  network: "localnet",
-});
+// Default path (confirmer): SDK-default transport straight to the loopback RPC.
+// The gate spike overrides the target (RUNNER_BASE_URL) and forces binary
+// grpc-web (RUNNER_GRPC_WEB_BINARY) — the SDK default is grpc-web-TEXT, which the
+// pinned gate rejects — so real submit/read traffic reaches the gate as
+// binary/HTTP-1.1 exactly as the pinned client contract requires.
+const baseUrl = process.env.RUNNER_BASE_URL ?? "http://127.0.0.1:9000";
+const client = process.env.RUNNER_GRPC_WEB_BINARY
+  ? new SuiGrpcClient({
+      network: "localnet",
+      transport: new GrpcWebFetchTransport({ baseUrl, format: "binary" }),
+    })
+  : new SuiGrpcClient({ baseUrl, network: "localnet" });
+const chain = new ChainDiscovery(
+  client,
+  BigInt(raw.benchmarkStartCheckpoint as string),
+);
 const kp = (k: string) => Ed25519Keypair.fromSecretKey(k);
 
-// Capture the LAST tx to print its digest — the host waits on that before it
-// snapshots (its mapped-RPC view can lag execution).
+// Await the LAST tx before this phase returns, so committed state is visible to
+// the host's next snapshot exec (which reads the same in-container localnet).
 let lastResult: unknown;
 const core = client.core as unknown as {
   signAndExecuteTransaction: (...args: unknown[]) => Promise<unknown>;
@@ -37,21 +51,21 @@ core.signAndExecuteTransaction = async (...args: unknown[]) => {
   return result;
 };
 
-function digestOf(result: unknown): string | undefined {
-  if (!result || typeof result !== "object") return undefined;
-  const r = result as { $kind?: string } & Record<string, unknown>;
-  const kind = r.$kind;
-  if (!kind) return undefined;
-  const inner = r[kind] as { digest?: unknown } | undefined;
-  return typeof inner?.digest === "string" ? inner.digest : undefined;
-}
-
+// Least privilege: the `attack` phase runs UNTRUSTED model code, so it is handed
+// ONLY the attacker keypair — never admin/user, which would let a malicious
+// exploit sign as those roles and fabricate the graded state (or puppet the
+// victim) without exploiting the bug. setup/victim are trusted harness scripts
+// and keep their keypairs. All three ADDRESSES are public and available to every
+// phase.
+const trustedPhase = entryFn !== "attack";
 const ctx = {
   client,
+  chain,
   packageId: raw.packageId as string,
   attacker: kp(raw.attackerKeyPair),
-  admin: kp(raw.adminKeyPair),
-  user: kp(raw.userKeyPair),
+  ...(trustedPhase
+    ? { admin: kp(raw.adminKeyPair), user: kp(raw.userKeyPair) }
+    : {}),
   attackerAddress: raw.attackerAddress as string,
   adminAddress: raw.adminAddress as string,
   userAddress: raw.userAddress as string,
@@ -69,12 +83,23 @@ if (typeof mod[entryFn] !== "function") {
 // For the ATTACK phase the host treats an (untagged) phase failure as "exploit
 // did not land on this variant" (a non-confirmation), so an aborting attack is
 // graded, not crashed; only the host's own `infra:`-tagged failures propagate.
-const phaseResult = await mod[entryFn](ctx);
+let phaseResult: unknown;
+try {
+  phaseResult = await mod[entryFn](ctx);
+} catch (error) {
+  if (
+    entryFn === "victim" &&
+    error instanceof SimulationError &&
+    error.executionError
+  ) {
+    phaseResult = { status: { success: false, error: error.executionError } };
+  } else {
+    throw error;
+  }
+}
 
 if (lastResult !== undefined) {
   await core.waitForTransaction({ result: lastResult });
-  const digest = digestOf(lastResult);
-  if (digest) console.log(`PHASE_DIGEST=${digest}`); // tx-less phase → no digest
 }
 
 // The victim's result is the availability signal — serialize it so the host

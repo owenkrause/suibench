@@ -1,4 +1,5 @@
 {
+  "id": "chal_1e06e3fd",
   "version": 1,
   "vulns": [
     {
@@ -6,7 +7,8 @@
       "module": "lending",
       "title": "withdraw books against a caller-supplied asset index but disburses from the generic Pool<T>, with no check the index matches T",
       "severity": "critical",
-      "root_cause": "The protocol identifies an asset two independent ways: the generic type parameter `T` of `Pool<T>` (which holds the real `Balance<T>`) and a separate `u8` `asset_index` used to key the `Storage.supply` accounting table. `withdraw<T>(storage, pool: &mut Pool<T>, asset_index, amount)` decrements the recorded supply for `asset_index` but takes the payout from `pool.reserve` (of type `T`), and never checks that `asset_index` corresponds to `T`. So an attacker who holds a small position in a cheap asset (e.g. an index whose recorded supply they can debit) passes that cheap `asset_index` together with a `Pool<Valuable>` of a different, more valuable type: the accounting is debited against the cheap asset while `Coin<Valuable>` is disbursed. Booking one asset and paying out another lets the attacker drain the valuable pool for the price of the cheap one. The fix is to bind the index to the type (derive the index from `T`, or assert a stored `index <-> type` mapping) so the accounting and the disbursed reserve always refer to the same asset.",
+      "harm": "state",
+      "root_cause": "The protocol identifies an asset two independent ways: the generic type parameter `T` of `Pool<T>` (which holds the real `Balance<T>`) and a separate `u8` `asset_index` used to key the `Storage.positions` accounting table (`Table<PosKey, u64>` keyed by `PosKey { user, index }`). `withdraw<T>(storage, pool: &mut Pool<T>, asset_index, amount)` decrements the caller's recorded position at `(sender, asset_index)` but takes the payout from `pool.reserve` (of type `T`), and never checks that `asset_index` corresponds to `T`. So an attacker who holds a small position in a cheap asset (e.g. an index whose recorded position they can debit) passes that cheap `asset_index` together with a `Pool<Valuable>` of a different, more valuable type: the accounting is debited against the cheap asset while `Coin<Valuable>` is disbursed. Booking one asset and paying out another lets the attacker drain the valuable pool for the price of the cheap one. The fix is to bind the index to the type (derive the index from `T`, or assert a stored `index <-> type` mapping) so the accounting and the disbursed reserve always refer to the same asset.",
       "exploit": true,
       "patch": true
     }

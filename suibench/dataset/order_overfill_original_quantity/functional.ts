@@ -8,28 +8,13 @@
 // fair remaining fill nets only 1_000, well under the threshold.
 import { Transaction } from "@mysten/sui/transactions";
 
+interface CreatedObject {
+  readonly id: string;
+  readonly type: string;
+}
+
 interface FunctionalContext {
   client: {
-    getOwnedObjects(i: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
-    queryTransactionBlocks(i: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: {
-        objectChanges?: {
-          type: string;
-          objectType?: string;
-          objectId?: string;
-        }[];
-      }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
     core: {
       signAndExecuteTransaction: (i: {
         transaction: Transaction;
@@ -38,6 +23,9 @@ interface FunctionalContext {
       }) => Promise<unknown>;
       waitForTransaction: (i: { result: unknown }) => Promise<unknown>;
     };
+  };
+  chain: {
+    findCreatedObjects(sender: string): Promise<readonly CreatedObject[]>;
   };
   packageId: string;
   attacker: unknown;
@@ -49,23 +37,14 @@ async function findCreated(
   ctx: FunctionalContext,
   objectType: string,
 ): Promise<string> {
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: ctx.adminAddress },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data)
-      for (const c of tx.objectChanges ?? [])
-        if (c.type === "created" && c.objectType === objectType && c.objectId)
-          return c.objectId;
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
+  const object = (await ctx.chain.findCreatedObjects(ctx.adminAddress)).find(
+    (created) => created.type === objectType,
+  );
+  if (object) return object.id;
   throw new Error(`functional: object of type ${objectType} not found`);
 }
 
-export async function attack(ctx: FunctionalContext): Promise<void> {
+export async function functional(ctx: FunctionalContext): Promise<void> {
   const order = await findCreated(ctx, `${ctx.packageId}::orderbook::Order`);
   const manager = await findCreated(
     ctx,
@@ -86,4 +65,3 @@ export async function attack(ctx: FunctionalContext): Promise<void> {
   await ctx.client.core.waitForTransaction({ result: res });
 }
 
-export const functional = attack;

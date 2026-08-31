@@ -1,7 +1,7 @@
 # suipad_refund_over_credit — Source provenance
 
 Confirmed-tier entry (owns `harness/`): a fresh-localnet over-refund exploit drives
-committed state that `harness/check.ts` grades deterministically.
+committed state that `check.ts` grades deterministically.
 
 ## Vulnerability
 - **Origin:** MoveBit — "SuiPad Smart Contract Audit Report", finding **VAT-04 "Incorrect
@@ -49,18 +49,18 @@ committed state that `harness/check.ts` grades deterministically.
   the admin and freezes the treasury cap (supply permanently fixed). Admin splits 100,000 TOKEN and
   calls `vault::open` to create the shared Vault seeded with 100,000 TOKEN, and splits 100 TOKEN to
   the ATTACKER as their invest stake.
-- `harness/solution.mts` — the reference exploit: one PTB `invest`s the attacker's 100 TOKEN
-  (RefundTicket{amount:100}) then `claim_refund`s it, receiving 100 * 1000 = 100,000 TOKEN and
-  draining the vault. Attacker Δ +99,900 TOKEN.
-- `harness/check.ts` — mechanism-sound predicate: attacker's net TOKEN gain ≥ 1000. Sound because a
-  CORRECT refund returns exactly the deposit (net 0), TOKEN supply is fixed at 1,000,000, and the
-  attacker only ever received their ~100 stake — a net gain of ≥ 1000 is unreachable without the
-  over-refund bug (the actual exploit yields +99,900, far above the floor).
-- `harness/functional.mts` — benign deposit-only flow: attacker `invest`s their 100 TOKEN and keeps
-  the RefundTicket, with NO refund. On the vulnerable package this is a net LOSS of 100 TOKEN, so it
-  must NOT trip check.ts. (Any refund on the vulnerable code always over-pays, so the honest legit
-  flow is the deposit alone.)
-- `harness/patches/claim-refund-multiplies-by-decimalprecision-without-dividing-over-refunding-the-depositor/vault.move`
+- `exploits/refund-over-credit.ts` — the reference exploit: one PTB splits and `invest`s exactly
+  1 TOKEN (RefundTicket{amount:1}) then `claim_refund`s it, receiving 1 * 1000 = 1,000 TOKEN.
+  Attacker net gain is 999 TOKEN.
+- `check.ts` — mechanism-sound predicate over successful `vault::RefundClaimed` events: the event
+  must name the attacker, record a positive `deposited_amount`, and report `paid_amount` strictly
+  greater than that deposit. Both vault variants emit this neutral event only after the payout coin
+  is successfully taken and its actual value is observed. The patch therefore yields no witness
+  because it pays exactly the deposited amount.
+- `functional.ts` — fair round-trip flow: attacker `invest`s their 100 TOKEN stake then immediately
+  `claim_refund`s it, asserting their total TOKEN balance is exactly the original 100 TOKEN stake.
+  This runs only on the patched package, proving the fix preserves a successful exact-value refund.
+- `patches/refund-over-credit/vault.move`
   — minimal fix: restore the divide (`ticket.amount * DECIMAL_PRECISION / DECIMAL_PRECISION`) so
   `claim_refund` returns exactly the deposit (net 0), breaking the exploit while preserving the
   benign deposit/refund round-trip.

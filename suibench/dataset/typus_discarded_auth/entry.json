@@ -1,0 +1,16 @@
+{
+  "id": "chal_647be7a0",
+  "version": 1,
+  "vulns": [
+    {
+      "id": "missing-authorization-update-v2-discards-its-permission-check",
+      "module": "oracle",
+      "title": "Missing authorization: update_v2 discards its permission check",
+      "severity": "critical",
+      "harm": "state",
+      "root_cause": "update_v2 computes vector::contains(&update_authority.authority, &sender) to test whether the caller is an authorized price updater, but discards the boolean result. Any account can call update_v2 and push arbitrary price/twap_price values into the shared Oracle because the permission check is not asserted.",
+      "exploit": true,
+      "patch": true
+    }
+  ]
+}

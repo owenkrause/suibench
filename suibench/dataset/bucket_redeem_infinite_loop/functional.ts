@@ -6,20 +6,15 @@
 // breaks out of the loop and returns normally → the victim redeem succeeds.
 import { Transaction } from "@mysten/sui/transactions";
 
+interface CreatedObject {
+  readonly id: string;
+  readonly type: string;
+  readonly digest: string;
+  readonly checkpoint: bigint;
+}
+
 interface FunctionalContext {
   client: {
-    queryTransactionBlocks(input: {
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{
-      data: {
-        objectChanges?: {
-          type: string;
-          objectType?: string;
-          objectId?: string;
-        }[];
-      }[];
-    }>;
     core: {
       signAndExecuteTransaction: (input: {
         transaction: Transaction;
@@ -28,6 +23,9 @@ interface FunctionalContext {
       }) => Promise<unknown>;
       waitForTransaction: (input: { result: unknown }) => Promise<unknown>;
     };
+  };
+  chain: {
+    findCreatedObjects(sender: string): Promise<readonly CreatedObject[]>;
   };
   packageId: string;
   attacker: unknown;
@@ -38,24 +36,18 @@ interface FunctionalContext {
 const DEBT = "2000000000000"; // 2000 BUCK > R = 1000 BUCK
 const COLLATERAL = 4_000_000_000; // 4 SUI; value = 4e9 * price(1000) = 4e12 buck >> 2200e9 (110% of D)
 
-async function findShared(ctx: FunctionalContext, needle: string): Promise<string> {
-  const page = await ctx.client.queryTransactionBlocks({
-    filter: { FromAddress: ctx.adminAddress },
-    options: { showObjectChanges: true },
-  });
-  for (const tx of page.data)
-    for (const ch of tx.objectChanges ?? [])
-      if (
-        ch.type === "created" &&
-        typeof ch.objectType === "string" &&
-        ch.objectType.includes(needle) &&
-        ch.objectId
-      )
-        return ch.objectId;
+async function findShared(
+  ctx: FunctionalContext,
+  needle: string,
+): Promise<string> {
+  const object = (await ctx.chain.findCreatedObjects(ctx.adminAddress)).find(
+    (created) => created.type.includes(needle),
+  );
+  if (object) return object.id;
   throw new Error(`functional: shared object matching ${needle} not found`);
 }
 
-export async function attack(ctx: FunctionalContext): Promise<void> {
+export async function functional(ctx: FunctionalContext): Promise<void> {
   const bucket = await findShared(ctx, "::bucket::Bucket<");
   const oracle = await findShared(ctx, "::bucket_oracle::BucketOracle");
 
@@ -80,5 +72,3 @@ export async function attack(ctx: FunctionalContext): Promise<void> {
   await ctx.client.core.waitForTransaction({ result: res });
 }
 
-/** Readable alias — the confirmer runner only ever calls `attack`. */
-export const functional = attack;

@@ -1,82 +1,68 @@
 // Functional (legit-behavior) check for `upgradecap_identity_unchecked` — see
 // ../sources/admin.move and ./check.ts.
 //
-// A benign, non-exploit flow: the attacker publishes their OWN throwaway package
-// (a perfectly legitimate thing to do — you get an UpgradeCap for your own
-// package) but does NOT call `claim_admin`. Merely HOLDING an UpgradeCap is not
-// the attack; the vulnerability is passing it to `claim_admin` to mint an
-// AdminCap. So this flow leaves the attacker with no AdminCap and must score
-// `confirmed = false` (Gate A). It runs identically on the vulnerable and patched
-// contract (it never touches claim_admin), asserting that ordinary publishing is
-// unaffected.
+// The LEGITIMATE flow: the deployer (`admin`), who holds THIS package's own
+// UpgradeCap (minted to them at publish), calls `claim_admin` with it and mints
+// their AdminCap. This is the path the fix must preserve — binding the cap to
+// this package rejects a foreign throwaway cap (the exploit) but must still
+// accept the protocol's own cap presented by its rightful holder.
+//
+// It exercises the REPAIRED function directly and asserts its output: after the
+// call the admin must own an AdminCap. A gold patch that disables `claim_admin`
+// (e.g. the `@challenge`-as-0x0 mistake that aborts for every caller) now fails
+// here instead of sneaking past a flow that never touched claim_admin.
 import { Transaction } from "@mysten/sui/transactions";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
+import type { Signer } from "@mysten/sui/cryptography";
 
 interface Ctx {
-  client: {
-    core: {
-      signAndExecuteTransaction: (i: {
-        transaction: Transaction;
-        signer: unknown;
-        include?: unknown;
-      }) => Promise<{ $kind?: string }>;
-      waitForTransaction: (i: { result: unknown }) => Promise<unknown>;
-    };
-  };
+  client: SuiGrpcClient;
   packageId: string;
-  attacker: unknown;
-  attackerAddress: string;
+  admin: Signer;
+  adminAddress: string;
 }
 
-function buildThrowaway(): { modules: string[]; dependencies: string[] } {
-  const dir = mkdtempSync(join(tmpdir(), "throwaway-"));
-  mkdirSync(join(dir, "sources"));
-  writeFileSync(
-    join(dir, "Move.toml"),
-    '[package]\nname = "throwaway"\nedition = "2024.beta"\n\n[addresses]\nthrowaway = "0x0"\n',
-  );
-  writeFileSync(
-    join(dir, "sources", "t.move"),
-    "module throwaway::t {\n    public fun ping(): u64 { 42 }\n}\n",
-  );
-  const out = execFileSync(
-    "sui",
-    [
-      "move",
-      "build",
-      "--build-env",
-      "mainnet",
-      "--dump-bytecode-as-base64",
-      "--path",
-      dir,
-    ],
-    { encoding: "utf-8" },
-  );
-  const parsed = JSON.parse(out.slice(out.indexOf("{")));
-  return {
-    modules: parsed.modules as string[],
-    dependencies: (parsed.dependencies as string[]) ?? [],
-  };
-}
+// RPC may strip leading zeros; canonicalize before comparing ids.
+const norm = (id: string): string =>
+  "0x" + id.replace(/^0x/, "").replace(/^0+/, "");
 
-export async function attack(ctx: Ctx): Promise<void> {
-  const { modules, dependencies } = buildThrowaway();
-  const pub = new Transaction();
-  pub.setSender(ctx.attackerAddress);
-  const cap = pub.publish({ modules, dependencies });
-  pub.transferObjects([cap], ctx.attackerAddress);
+export async function functional(ctx: Ctx): Promise<void> {
+  // Locate the protocol's OWN UpgradeCap — the one governing this package,
+  // minted to the deployer (admin) at publish (`fields.package === packageId`).
+  const caps = await ctx.client.core.listOwnedObjects({
+    owner: ctx.adminAddress,
+    type: "0x2::package::UpgradeCap",
+    include: { json: true },
+  });
+  const wantPkg = norm(ctx.packageId);
+  const protocolCap = caps.objects.find(
+    (o) => norm(String(o.json?.package ?? "")) === wantPkg,
+  )?.objectId;
+  if (!protocolCap)
+    throw new Error("functional: protocol UpgradeCap not found on admin");
+
+  const claim = new Transaction();
+  claim.setSender(ctx.adminAddress);
+  const adminCap = claim.moveCall({
+    target: `${ctx.packageId}::admin::claim_admin`,
+    arguments: [claim.object(protocolCap)],
+  });
+  claim.transferObjects([adminCap], ctx.adminAddress);
   const res = await ctx.client.core.signAndExecuteTransaction({
-    transaction: pub,
-    signer: ctx.attacker,
+    transaction: claim,
+    signer: ctx.admin,
     include: { effects: true },
   });
   if (res.$kind === "FailedTransaction")
-    throw new Error("functional: publish throwaway failed");
+    throw new Error("functional: claim_admin (legit admin) failed");
   await ctx.client.core.waitForTransaction({ result: res });
-  // Deliberately do NOT call claim_admin — holding an UpgradeCap is not the attack.
+
+  // Assert the repaired output: the legitimate caller now holds an AdminCap.
+  const admins = await ctx.client.core.listOwnedObjects({
+    owner: ctx.adminAddress,
+    type: `${ctx.packageId}::admin::AdminCap`,
+  });
+  if (admins.objects.length === 0)
+    throw new Error("functional: no AdminCap minted to admin after claim_admin");
 }
 
-export const functional = attack;

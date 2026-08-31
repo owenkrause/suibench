@@ -3,6 +3,8 @@ module challenge::orderbook {
     use sui::coin::{Self, Coin};
     use challenge::asset::ASSET;
 
+    const EWrongManager: u64 = 0;
+
     public struct Manager has key {
         id: UID,
         owner: address,
@@ -36,6 +38,8 @@ module challenge::orderbook {
     }
 
     public fun take(order: &mut Order, maker: &mut Manager, take_qty: u64, ctx: &mut TxContext): Coin<ASSET> {
+        // The order's base is settled from its own maker's Manager, not an arbitrary one.
+        assert!(maker.owner == order.maker, EWrongManager);
         let fill = if (take_qty <= order.quantity) { take_qty } else { order.quantity };
         order.filled = order.filled + fill;
         coin::from_balance(balance::split(&mut maker.base, fill), ctx)

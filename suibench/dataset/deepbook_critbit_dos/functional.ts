@@ -1,5 +1,32 @@
 import { Transaction } from "@mysten/sui/transactions";
 
+interface CreatedObject {
+  readonly id: string;
+  readonly type: string;
+  readonly digest: string;
+  readonly checkpoint: bigint;
+}
+
+interface FunctionalContext {
+  client: {
+    core: {
+      signAndExecuteTransaction(input: {
+        transaction: Transaction;
+        signer: unknown;
+        include?: unknown;
+      }): Promise<unknown>;
+      waitForTransaction(input: { result: unknown }): Promise<unknown>;
+    };
+  };
+  chain: {
+    findCreatedObjects(sender: string): Promise<readonly CreatedObject[]>;
+  };
+  packageId: string;
+  adminAddress: string;
+  attackerAddress: string;
+  attacker: unknown;
+}
+
 // Benign flow: the SAME legitimate inserts as the attack, but WITHOUT the trap
 // removals — a normal order book being populated. The tree stays well-formed
 // (every live internal index < table::length), so the victim's next_leaf(32)
@@ -7,24 +34,18 @@ import { Transaction } from "@mysten/sui/transactions";
 // is the Gate A anchor: the exploit is the deletion trap, not the inserts.
 const INSERT_KEYS = [1, 2, 4, 8, 16, 32];
 
-async function findShared(ctx: any, needle: string): Promise<string> {
-  const page = await ctx.client.queryTransactionBlocks({
-    filter: { FromAddress: ctx.adminAddress },
-    options: { showObjectChanges: true },
-  });
-  for (const tx of page.data)
-    for (const ch of tx.objectChanges ?? [])
-      if (
-        ch.type === "created" &&
-        typeof ch.objectType === "string" &&
-        ch.objectType.includes(needle) &&
-        ch.objectId
-      )
-        return ch.objectId;
+async function findShared(
+  ctx: FunctionalContext,
+  needle: string,
+): Promise<string> {
+  const object = (await ctx.chain.findCreatedObjects(ctx.adminAddress)).find(
+    (created) => created.type.includes(needle),
+  );
+  if (object) return object.id;
   throw new Error(`functional: shared object matching ${needle} not found`);
 }
 
-export async function attack(ctx: any): Promise<void> {
+export async function functional(ctx: FunctionalContext): Promise<void> {
   const holder = await findShared(ctx, "::critbit_test::TreeHolder");
 
   const tx = new Transaction();

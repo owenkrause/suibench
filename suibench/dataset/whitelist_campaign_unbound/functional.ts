@@ -1,52 +1,26 @@
 // Functional (legit-behavior) check for `whitelist_campaign_unbound` — see
 // ../sources/launchpad.move.
 //
-// A CORRECT patch adds `assert!(whitelist.campaign_id == id(campaign))` to
-// `invest` WITHOUT breaking the legitimate path: a correctly-MATCHED invest — a
-// real whitelisted member investing in the very campaign their whitelist belongs
-// to — must still succeed. This exercises exactly that: the USER, who setup.ts
-// added to Whitelist_A (campaign A's own list), invests in campaign A with
-// Whitelist_A (the correct pair). If the patch is right this still goes through;
-// if a patch over-restricts and breaks it, the functional check fails.
+// Each one-mechanism patch must preserve a correctly matched investment by a
+// legitimate member. The USER, whom setup.ts added to Whitelist_A, invests in
+// campaign A with Whitelist_A; this remains valid under all three overlays.
 //
 // This is exported as `attack(ctx)` because the confirmer runner only ever calls
 // `attack`; here it performs a benign, correctly-bound invest.
 import { Transaction } from "@mysten/sui/transactions";
-
-interface ObjectChange {
-  type: string;
-  objectType?: string;
-  objectId?: string;
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
+import type { Signer } from "@mysten/sui/cryptography";
+interface NativeChain {
+  findCreatedObjects(sender: string): Promise<
+    readonly { id: string; type: string; digest: string; checkpoint: bigint }[]
+  >;
 }
 
 interface FunctionalContext {
-  client: {
-    getObject(i: {
-      id: string;
-      options?: unknown;
-    }): Promise<{
-      data?: { content?: { fields?: Record<string, unknown> } | null } | null;
-    }>;
-    queryTransactionBlocks(i: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: { objectChanges?: ObjectChange[] | null }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
-    core: {
-      signAndExecuteTransaction: (i: {
-        transaction: Transaction;
-        signer: unknown;
-        include?: unknown;
-      }) => Promise<{ $kind?: string }>;
-      waitForTransaction: (i: { result: unknown }) => Promise<unknown>;
-    };
-  };
+  client: SuiGrpcClient;
+  chain: NativeChain;
   packageId: string;
-  user: unknown;
+  user: Signer;
   userAddress: string;
   adminAddress: string;
 }
@@ -56,25 +30,12 @@ async function createdByOfType(
   creator: string,
   wantType: string,
 ): Promise<string[]> {
-  const ids: string[] = [];
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: creator },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const t of page.data)
-      for (const c of t.objectChanges ?? []) {
-        if (c.type === "created" && c.objectType === wantType && c.objectId)
-          ids.push(c.objectId);
-      }
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
-  return ids;
+  return (await ctx.chain.findCreatedObjects(creator))
+    .filter((object) => object.type === wantType)
+    .map((object) => object.id);
 }
 
-export async function attack(ctx: FunctionalContext): Promise<void> {
+export async function functional(ctx: FunctionalContext): Promise<void> {
   const pkg = ctx.packageId;
   const CAMPAIGN = `${pkg}::launchpad::Campaign`;
   const WHITELIST = `${pkg}::launchpad::Whitelist`;
@@ -91,11 +52,11 @@ export async function attack(ctx: FunctionalContext): Promise<void> {
   // Pick the admin whitelist that belongs to campaign A (its campaign_id matches).
   let whitelistA: string | undefined;
   for (const w of adminWhitelists) {
-    const r = await ctx.client.getObject({
-      id: w,
-      options: { showContent: true },
+    const { object } = await ctx.client.core.getObject({
+      objectId: w,
+      include: { json: true },
     });
-    if (r.data?.content?.fields?.campaign_id === campaignA) {
+    if (object.json?.campaign_id === campaignA) {
       whitelistA = w;
       break;
     }
@@ -123,5 +84,3 @@ export async function attack(ctx: FunctionalContext): Promise<void> {
     );
   await ctx.client.core.waitForTransaction({ result: res });
 }
-
-export const functional = attack;

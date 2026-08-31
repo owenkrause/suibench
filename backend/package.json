@@ -1,0 +1,25 @@
+{
+  "name": "backend",
+  "type": "module",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "check": "astro check",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@astrojs/node": "10.1.4",
+    "astro": "^6.4.8",
+    "core": "workspace:*",
+    "pg": "^8.23.0",
+    "suibench": "workspace:*",
+    "tar": "^7"
+  },
+  "devDependencies": {
+    "pg-mem": "^3.0.14",
+    "vitest": "^4.1.3"
+  }
+}

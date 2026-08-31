@@ -11,6 +11,7 @@
 // tiers (`recall`/`precision`/`severity_accuracy` + counts), only the matching
 // mechanism differs. So a mixed-tier corpus pools uniformly.
 import type { Finding, Severity, Harm, Attribution } from "./types.js";
+import type { RunScore } from "./scorecard.js";
 
 export interface VulnLabel {
   /** Stable join key tying label ↔ patch ↔ attribution. Author-assigned, never
@@ -42,14 +43,15 @@ export interface LabelResult {
 export interface FindingResult {
   id: string;
   title: string;
-  classification: "TP" | "FP";
+  classification: "TP" | "FP" | "UNATTRIBUTED";
   matched_label: string | null;
   confirmed: boolean;
 }
 
 /**
  * Flat metric bag + a `tier` tag. Both tiers carry the SAME fields; the `tier`
- * records which grader produced them (soft `JudgeFn` vs hard `base ∧ ¬patch`).
+ * records which grader produced them (soft `JudgeFn` vs hard base-witness/
+ * own-patch subtraction).
  * No prefixed/tier-exclusive fields — nothing is representable in one tier that
  * isn't in the other, so aggregation over a mixed corpus is well-defined.
  */
@@ -60,8 +62,10 @@ export interface ScoreMetrics {
   findings_total: number;
   true_positives: number;
   false_positives: number;
+  unattributed_findings: number;
   recall: number | null;
   precision: number | null;
+  attribution_rate: number | null;
   /** severity_correct / severity_total; null iff severity_total is 0. Carrying
    *  the raw counts (not just the rate) lets micro pool them exactly — the
    *  denominator differs by tier (hit labels vs attributed exploits). */
@@ -85,18 +89,13 @@ function assertUniqueIds(vulns: VulnLabel[]): void {
   }
 }
 
-type Scored = {
-  labels: LabelResult[];
-  findings: FindingResult[];
-  metrics: ScoreMetrics;
-};
 
 /** Detect tier — LLM judge ONLY. No exploit, no confirmation, no attribution. */
 export async function scoreDetect(
   findings: Finding[],
   groundtruth: GroundTruth,
   judge: JudgeFn,
-): Promise<Scored> {
+): Promise<RunScore> {
   assertUniqueIds(groundtruth.vulns);
   const vulns = groundtruth.vulns;
   const isNegative = vulns.length === 0;
@@ -160,8 +159,10 @@ export async function scoreDetect(
     findings_total: findingsTotal,
     true_positives: truePositives,
     false_positives: falsePositives,
+    unattributed_findings: 0,
     recall: isNegative ? null : labelsTotal === 0 ? 0 : labelsHit / labelsTotal,
     precision: findingsTotal === 0 ? null : truePositives / findingsTotal,
+    attribution_rate: null,
     severity_accuracy:
       isNegative || labelsHit === 0 ? null : severityCorrect / labelsHit,
     severity_correct: isNegative ? 0 : severityCorrect,
@@ -180,7 +181,7 @@ export function scoreConfirmed(
   findings: Finding[],
   groundtruth: GroundTruth,
   attribution: Attribution,
-): Scored {
+): RunScore {
   assertUniqueIds(groundtruth.vulns);
   const vulns = groundtruth.vulns;
   const labelSeverity = new Map<string, Severity>(
@@ -190,21 +191,27 @@ export function scoreConfirmed(
 
   // label id -> the first attributed exploit id that covers it (for LabelResult).
   const labelHitBy = new Map<string, string>();
-  for (const [exploitId, ids] of Object.entries(attribution.perExploit)) {
-    for (const id of ids) if (!labelHitBy.has(id)) labelHitBy.set(id, exploitId);
+  for (const [exploitId, state] of Object.entries(attribution.perExploit)) {
+    if (state.kind !== "attributed") continue;
+    for (const id of state.labels) {
+      if (!labelHitBy.has(id)) labelHitBy.set(id, exploitId);
+    }
   }
 
   const findingResults: FindingResult[] = Object.entries(
     attribution.perExploit,
-  ).map(([exploitId, ids]) => {
-    const attributed = ids.length > 0;
+  ).map(([exploitId, state]) => {
     const f = findingById.get(exploitId);
     return {
       id: exploitId,
       title: f?.title ?? exploitId,
-      classification: attributed ? "TP" : "FP",
-      matched_label: attributed ? ids[0] : null,
-      confirmed: attributed,
+      classification: state.kind === "attributed"
+        ? "TP" as const
+        : state.kind === "unattributed"
+          ? "UNATTRIBUTED" as const
+          : "FP" as const,
+      matched_label: state.kind === "attributed" ? state.labels[0] : null,
+      confirmed: state.kind !== "refuted",
     };
   });
 
@@ -234,34 +241,44 @@ export function scoreConfirmed(
   });
 
   const labelsTotal = vulns.length;
-  const exploitCarrying = Object.keys(attribution.perExploit).length;
-  const attributed = Object.values(attribution.perExploit).filter(
-    (h) => h.length > 0,
-  ).length;
-  const falsePositives = exploitCarrying - attributed;
+  const states = Object.values(attribution.perExploit);
+  const findingCount = states.length;
+  const attributed = states.filter((state) => state.kind === "attributed").length;
+  const falsePositives = states.filter((state) => state.kind === "refuted").length;
+  const unattributed = states.filter((state) => state.kind === "unattributed").length;
   const labelsHit = attribution.confirmedLabels.length;
 
   // severity_accuracy: among attributed exploits, correct iff the exploit's
   // finding severity matches EVERY label it attributed to.
   let sevChecked = 0;
   let sevCorrect = 0;
-  for (const [exploitId, ids] of Object.entries(attribution.perExploit)) {
-    if (ids.length === 0) continue;
+  for (const [exploitId, state] of Object.entries(attribution.perExploit)) {
+    if (state.kind !== "attributed") continue;
     const f = findingById.get(exploitId);
     if (!f) continue;
     sevChecked++;
-    if (ids.every((id) => labelSeverity.get(id) === f.severity)) sevCorrect++;
+    if (state.labels.every((id) => labelSeverity.get(id) === f.severity)) sevCorrect++;
   }
 
   const metrics: ScoreMetrics = {
     tier: "confirmed",
     labels_total: labelsTotal,
     labels_hit: labelsHit,
-    findings_total: exploitCarrying,
+    findings_total: findingCount,
     true_positives: attributed,
     false_positives: falsePositives,
-    recall: labelsTotal === 0 ? 0 : labelsHit / labelsTotal,
-    precision: exploitCarrying === 0 ? null : attributed / exploitCarrying,
+    unattributed_findings: unattributed,
+    // A negative control (no labels) has no recall to report — return null so it
+    // doesn't drag macro recall to 0, matching the detect-axis scorer.
+    recall: labelsTotal === 0 ? null : labelsHit / labelsTotal,
+    precision:
+      attributed + falsePositives === 0
+        ? null
+        : attributed / (attributed + falsePositives),
+    attribution_rate:
+      attributed + unattributed === 0
+        ? null
+        : attributed / (attributed + unattributed),
     severity_accuracy: sevChecked === 0 ? null : sevCorrect / sevChecked,
     severity_correct: sevCorrect,
     severity_total: sevChecked,
@@ -283,7 +300,7 @@ export async function scoreFindings(
   judge: JudgeFn,
   confirmable: boolean = false,
   attribution?: Attribution,
-): Promise<Scored> {
+): Promise<RunScore> {
   if (!confirmable) return scoreDetect(findings, groundtruth, judge);
   if (!attribution) {
     throw new Error("confirmed tier requires an Attribution");

@@ -1,4 +1,5 @@
 {
+  "id": "chal_97b91d53",
   "version": 1,
   "vulns": [
     {
@@ -6,6 +7,7 @@
       "module": "liquid_staking",
       "title": "redeem shrinks the share supply before computing the redemption rate, so the rate uses a reduced denominator and over-pays",
       "severity": "critical",
+      "harm": "state",
       "root_cause": "The redemption rate is `total_wal / total_hawal` (backing per share). A redemption of `hawal_amount` shares should pay `hawal_amount * total_wal / total_hawal` computed against the CURRENT share supply, then burn the shares. `redeem` does it in the wrong order: it first burns the shares (`total_hawal = total_hawal - hawal_amount`) and only THEN computes `wal_out = hawal_amount * total_wal / total_hawal` — so the divisor is the already-shrunk supply, inflating the rate. For example with total_wal = total_hawal = 1000, redeeming 500 shares yields `500 * 1000 / 500 = 1000` WAL instead of 500 — a 2x over-redemption. An attacker redeems and receives far more of the underlying than their shares are worth, draining backing owed to the remaining haWAL holders (and, as the pool shrinks, the last holders cannot redeem at all). The two counters `total_wal` and `total_hawal` desync because the share counter is updated before the payout is priced. The fix is to compute `wal_out` from the original `total_hawal`, then decrement both counters.",
       "exploit": true,
       "patch": true

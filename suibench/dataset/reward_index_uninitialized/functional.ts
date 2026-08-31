@@ -3,26 +3,17 @@
 //
 // Benign: the legitimate long-term staker (admin, who staked before the reward accrued)
 // claims their earned rewards. This exercises the claim path a correct patch preserves
-// and does not touch the attacker's balance, so the attacker-gain check stays false.
+// and does not create the shared-Spool state transition required by the
+// operation-specific checker.
 import { Transaction } from "@mysten/sui/transactions";
+
+interface CreatedObject {
+  readonly id: string;
+  readonly type: string;
+}
 
 interface Ctx {
   client: {
-    queryTransactionBlocks(i: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: {
-        objectChanges?: {
-          type: string;
-          objectType?: string;
-          objectId?: string;
-        }[];
-      }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
     core: {
       signAndExecuteTransaction: (i: {
         transaction: Transaction;
@@ -32,33 +23,23 @@ interface Ctx {
       waitForTransaction: (i: { result: unknown }) => Promise<unknown>;
     };
   };
+  chain: {
+    findCreatedObjects(sender: string): Promise<readonly CreatedObject[]>;
+  };
   packageId: string;
   admin: unknown;
   adminAddress: string;
 }
 
 async function findSpool(ctx: Ctx): Promise<string> {
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: ctx.adminAddress },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data)
-      for (const c of tx.objectChanges ?? [])
-        if (
-          c.type === "created" &&
-          c.objectType === `${ctx.packageId}::spool::Spool` &&
-          c.objectId
-        )
-          return c.objectId;
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
+  const spool = (await ctx.chain.findCreatedObjects(ctx.adminAddress)).find(
+    (object) => object.type === `${ctx.packageId}::spool::Spool`,
+  );
+  if (spool) return spool.id;
   throw new Error("functional: Spool not found");
 }
 
-export async function attack(ctx: Ctx): Promise<void> {
+export async function functional(ctx: Ctx): Promise<void> {
   const spool = await findSpool(ctx);
   const tx = new Transaction();
   tx.setSender(ctx.adminAddress);
@@ -76,6 +57,3 @@ export async function attack(ctx: Ctx): Promise<void> {
     throw new Error("functional: admin claim failed");
   await ctx.client.core.waitForTransaction({ result: res });
 }
-
-/** Readable alias — the confirmer runner only ever calls `attack`. */
-export const functional = attack;

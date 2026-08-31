@@ -15,7 +15,7 @@ a valid signature; victim = the game / other players).
 - **Class:** signature/authorization payload not bound to the generic type it authorizes → cross-coin replay.
 
 ## Vulnerability
-`sell_pack<COIN>` verifies a server ed25519 signature over `PackMessage { pack_id, amount, nonce }` — which
+`sell_pack<COIN>` verifies a server ed25519 signature over `PackMessage { pack_id, amount, owner }` — which
 does not include `COIN` — before paying `amount` out of a `Game<COIN>` reserve. A signature issued for a
 cheap coin's sale is byte-identical for a valuable coin's, so the attacker replays it against
 `sell_pack<ValuableCoin>` and drains the valuable reserve.
@@ -25,7 +25,20 @@ cheap coin's sale is byte-identical for a valuable coin's, so the attacker repla
   reserves, and a `sell_pack<COIN>` that verifies a signature over a `PackMessage` omitting the coin type.
   Uses the real `sui::ed25519::ed25519_verify` + `std::bcs::to_bytes` so the missing type-binding is faithful.
 
+## Single labeled defect: replay protection is implemented
+The reconstruction implements genuine per-`Game` single-use of each `pack_id` (a
+`used: Table<u64, bool>` consumed in `sell_pack` after signature verification), so the ONLY
+authorization weakness is the labeled one: the signed `PackMessage` omitting `COIN`. An earlier
+reconstruction carried an *invented* `nonce` field that was signed but never consumed — advertising
+replay protection it did not implement — which is replaced here with real consumption. Placement is
+deliberately per-game, **not** on the shared `Server`: a server-wide used-set would also reject the
+cross-coin replay (same `pack_id`, different `Game<COIN>`) and thereby mask the labeled bug.
+
 ## Decontamination
 - Package/address `challenge`; module `game`. No vuln/audit/fix-naming comments in `sources/` (the bug is the
   `PackMessage` shape omitting `COIN` in the signed `bytes`). Edition `2024`. Builds clean with
   `sui move build --build-env mainnet`.
+- The server public key is registered from the fresh trusted admin signer for
+  each run. Only trusted setup and functional phases can use that signer; an
+  untrusted attack receives the published CHEAP authorization and its own
+  attacker signer, never reusable server-secret material.

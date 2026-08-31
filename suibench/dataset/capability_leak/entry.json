@@ -1,4 +1,5 @@
 {
+  "id": "chal_21cdd970",
   "version": 1,
   "vulns": [
     {
@@ -6,6 +7,7 @@
       "module": "vault",
       "title": "AdminCap leaks to any caller",
       "severity": "critical",
+      "harm": "state",
       "root_cause": "request_admin_status mints and returns an AdminCap to any caller instead of verifying the caller is the deployer, so any user can obtain withdraw rights and drain the vault.",
       "exploit": true,
       "patch": true

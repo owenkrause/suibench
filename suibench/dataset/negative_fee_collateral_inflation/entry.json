@@ -1,4 +1,5 @@
 {
+  "id": "chal_5eb96a12",
   "version": 1,
   "vulns": [
     {
@@ -6,6 +7,7 @@
       "module": "perp",
       "title": "settle_fee bounds only the fee magnitude, not its sign, so a caller-supplied negative fee inflates their collateral",
       "severity": "critical",
+      "harm": "state",
       "root_cause": "The integrator/trading fee is a SIGNED amount supplied by the caller (`Fee { magnitude, negative }`). `settle_fee` validates only that `fee.magnitude <= MAX_FEE` — it never checks that the fee is non-negative. A fee is meant to be SUBTRACTED from the account's collateral, but the negative branch ADDS `magnitude` to collateral instead (`acct.collateral = acct.collateral + fee.magnitude`). So an attacker submits a fee with `negative = true` and a magnitude up to MAX_FEE, and instead of paying a fee their collateral is credited for free. Repeating this inflates their collateral without any deposit; they then `withdraw` the fabricated balance, draining real SUI from the shared exchange vault at the expense of other depositors. A fee input must be constrained to be non-negative (`assert!(!fee.negative)` / reject a signed fee below zero) before it is applied. This mirrors the real Aftermath perpetuals exploit where an unchecked negative signed fee turned `value - fee` into `value + |fee|`.",
       "exploit": true,
       "patch": true

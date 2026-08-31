@@ -16,27 +16,20 @@ const WITHDRAW_AMOUNT = 1_000n; // the user's own seeded collateral
 
 interface TxResult {
   $kind?: string;
-  Transaction?: { objectChanges?: { type: string; packageId?: string }[] };
   FailedTransaction?: unknown;
+}
+
+interface CreatedObject {
+  readonly id: string;
+  readonly type: string;
+}
+
+interface PublishedPackage {
+  readonly id: string;
 }
 
 interface Ctx {
   client: {
-    queryTransactionBlocks(i: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: {
-        objectChanges?: {
-          type: string;
-          objectType?: string;
-          objectId?: string;
-        }[];
-      }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
     core: {
       signAndExecuteTransaction: (i: {
         transaction: Transaction;
@@ -46,6 +39,10 @@ interface Ctx {
       waitForTransaction: (i: { result: unknown }) => Promise<unknown>;
     };
   };
+  chain: {
+    findCreatedObjects(sender: string): Promise<readonly CreatedObject[]>;
+    findPublishedPackages(sender: string): Promise<readonly PublishedPackage[]>;
+  };
   packageId: string;
   user: unknown;
   userAddress: string;
@@ -54,42 +51,17 @@ interface Ctx {
 
 async function findMarketMaker(ctx: Ctx): Promise<string> {
   const mmType = `${ctx.packageId}::market_maker::MarketMaker`;
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: ctx.adminAddress },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data) {
-      for (const c of tx.objectChanges ?? []) {
-        if (c.type === "created" && c.objectType === mmType && c.objectId)
-          return c.objectId;
-      }
-    }
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
+  const marketMaker = (
+    await ctx.chain.findCreatedObjects(ctx.adminAddress)
+  ).find((object) => object.type === mmType);
+  if (marketMaker) return marketMaker.id;
   throw new Error("functional: MarketMaker not found");
 }
 
 async function findPublishedPkg(ctx: Ctx, sender: string): Promise<string> {
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: sender },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data) {
-      for (const c of (tx.objectChanges ?? []) as {
-        type: string;
-        packageId?: string;
-      }[]) {
-        if (c.type === "published" && c.packageId) return c.packageId;
-      }
-    }
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
+  const packages = await ctx.chain.findPublishedPackages(sender);
+  const latest = packages[packages.length - 1];
+  if (latest) return latest.id;
   throw new Error("functional: no published package found");
 }
 
@@ -117,11 +89,9 @@ function buildHelperPkg(packageId: string): {
     join(dir, "sources", "drain.move"),
     `module att::drain {\n` +
       `    use sui::coin::Coin;\n` +
-      `    use challenge::asset::ASSET;\n` +
-      `    use challenge::market_maker::{Self, MarketMaker};\n` +
-      `    public fun go(mm: &mut MarketMaker, who: address, amount: u64, ctx: &mut TxContext): Coin<ASSET> {\n` +
-      `        let acct = market_maker::account_mut(mm, who);\n` +
-      `        market_maker::withdraw(acct, amount, ctx)\n` +
+      `    public fun go(mm: &mut challenge::market_maker::MarketMaker, who: address, amount: u64, ctx: &mut TxContext): Coin<challenge::asset::ASSET> {\n` +
+      `        let acct = challenge::market_maker::account_mut(mm, who);\n` +
+      `        challenge::market_maker::withdraw(acct, amount, ctx)\n` +
       `    }\n` +
       `}\n`,
   );
@@ -145,7 +115,7 @@ function buildHelperPkg(packageId: string): {
   };
 }
 
-export async function attack(ctx: Ctx): Promise<void> {
+export async function functional(ctx: Ctx): Promise<void> {
   const mm = await findMarketMaker(ctx);
 
   const { modules, dependencies } = buildHelperPkg(ctx.packageId);
@@ -184,5 +154,3 @@ export async function attack(ctx: Ctx): Promise<void> {
     throw new Error("functional: self-withdraw failed");
   await ctx.client.core.waitForTransaction({ result: callRes });
 }
-
-export const functional = attack;

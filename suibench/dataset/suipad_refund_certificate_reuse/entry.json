@@ -1,4 +1,5 @@
 {
+  "id": "chal_c1bfd219",
   "version": 1,
   "vulns": [
     {
@@ -6,6 +7,7 @@
       "module": "insurance",
       "title": "claim_refund never marks the InvestCertificate claimed, allowing unlimited refund replays",
       "severity": "critical",
+      "harm": "state",
       "root_cause": "claim_refund pays out `cert.amount` TOKEN from the shared Vault (`coin::take(&mut vault.funds, cert.amount, ctx)`) against an InvestCertificate but never verifies or updates any state on the certificate — it does not check a `claimed` flag and does not set one. The InvestCertificate is therefore never consumed or marked spent, so the SAME certificate can be passed to claim_refund an unlimited number of times, each call drawing another `cert.amount` out of the shared reserve. An attacker invests a small stake once to obtain a certificate, then replays claim_refund against it (e.g. 50 times in a single PTB, reusing the one cert across every call) to drain the pool far beyond their deposit. The fix is to verify the certificate has not already been claimed and mark it claimed on first use — `assert!(!cert.claimed, EAlreadyClaimed); cert.claimed = true;` as the first lines of claim_refund (or otherwise consume the certificate) — so a single certificate yields exactly one refund.",
       "exploit": true,
       "patch": true

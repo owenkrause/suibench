@@ -8,9 +8,12 @@
 // for a net of +1000. A correct (fair-rate) redeem returns exactly the 1000
 // staked, netting 0. Supply is fixed and the attacker never minted, so a net gain
 // >= 500 means they over-redeemed at the other holders' expense.
-import { type Check, balanceGained } from "core";
+import { type Check, type CheckResult, balanceGained } from "core";
 
-export const check: Check = (delta, params) => {
+const LABEL_ID = "burn-before-rate" as const;
+
+export const check: Check = (delta, params): CheckResult => {
   const ASSET = `${params.packageId}::asset::ASSET`;
-  return balanceGained(delta, params.attackerAddress, ASSET) >= 500n;
+  const witnessed = balanceGained(delta, params.attackerAddress, ASSET) >= 500n;
+  return { witnesses: witnessed ? [LABEL_ID] : [] };
 };

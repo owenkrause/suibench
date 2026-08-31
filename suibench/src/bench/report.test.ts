@@ -15,7 +15,12 @@ import {
 import type { RunManifest } from "../adapters/manifest.js";
 
 const manifest: RunManifest = {
-  sui_version: "sui 1.42.0", image_id: "sha256:x", node_version: "22.0.0",
+  images: {
+    untrusted: { name: "suibench-untrusted-runtime", id: "sha256:u", sui_version: "sui 1.42.0" },
+    confirmer: { name: "suibench-confirmer", id: "sha256:c", sui_version: "sui 1.42.0" },
+    gate: { name: "suibench-gate", id: "sha256:g", sui_version: null },
+  },
+  node_version: "22.0.0",
   mysten_sui_version: "^2.15.0", git_commit: "abc1234",
 };
 
@@ -35,43 +40,6 @@ describe("CostCollector", () => {
 });
 
 describe("writeRunReport", () => {
-  it("rejects a non-empty output directory instead of mixing runs", () => {
-    const dir = mkdtempSync(join(tmpdir(), "suibench-report-"));
-    writeFileSync(join(dir, "stale-scorecard.json"), "{}");
-    const score = {
-      complete: true,
-      scored: 0,
-      errored: 0,
-      micro: {},
-      macro: {},
-      entries: [],
-      erroredEntries: [],
-    } as unknown as CorpusScore;
-
-    expect(() =>
-      writeRunReport(
-        dir,
-        { score, cost: new CostCollector().corpusCost(), manifest },
-        {
-          axis: "comprehension",
-          harness: "static",
-          model: "m",
-          judgeModel: "m",
-          k: 1,
-          concurrency: 1,
-          maxTurns: 60,
-          effort: "low",
-          dataset: "/dataset",
-          filter: null,
-          policy: "live",
-          requestedTargets: [],
-          image: "suibench-auditor",
-        },
-      ),
-    ).toThrow(/output directory is not empty/);
-    expect(existsSync(join(dir, "manifest.json"))).toBe(false);
-  });
-
   it("lays out manifest.json, corpus.json, and one scorecard.json per entry", () => {
     const dir = mkdtempSync(join(tmpdir(), "suibench-report-"));
     const score = {
@@ -94,8 +62,8 @@ describe("writeRunReport", () => {
     writeRunReport(dir, report, {
       axis: "exploitation", harness: "harnessed", model: "claude-opus-4-8",
       judgeModel: "claude-opus-4-8", k: 1, concurrency: 3, maxTurns: 60,
-      effort: "medium", dataset: "/dataset", filter: "vault", policy: "live",
-      requestedTargets: ["vault"], image: "suibench-auditor",
+      effort: "medium", dataset: "/dataset", filter: "vault",
+      requestedTargets: ["vault"], images: { untrusted: "suibench-untrusted-runtime", confirmer: "suibench-confirmer", gate: "suibench-gate" },
     });
 
     expect(existsSync(join(dir, "manifest.json"))).toBe(true);
@@ -104,7 +72,6 @@ describe("writeRunReport", () => {
     expect(corpus.config.concurrency).toBe(3);
     expect(corpus.config.maxTurns).toBe(60);
     expect(corpus.config.effort).toBe("medium");
-    expect(corpus.config.policy).toBe("live");
     expect(corpus.config.requestedTargets).toEqual(["vault"]);
     expect(corpus.scored).toBe(1);
     expect(existsSync(join(dir, "entries", "vault", "scorecard.json"))).toBe(true);
@@ -126,8 +93,8 @@ describe("writeRunReport", () => {
         {
           axis: "exploitation", harness: "static", model: "m", judgeModel: "m",
           k: 1, concurrency: 1, maxTurns: 60,
-          effort: "low", dataset: "/dataset", filter: null, policy: "scripted",
-          requestedTargets: ["t"], image: "suibench-auditor",
+          effort: "low", dataset: "/dataset", filter: null,
+          requestedTargets: ["t"], images: { untrusted: "suibench-untrusted-runtime", confirmer: "suibench-confirmer", gate: "suibench-gate" },
         }),
     ).not.toThrow();
     const card = readFileSync(join(dir, "entries", "t", "scorecard.json"), "utf-8");

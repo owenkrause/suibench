@@ -12,8 +12,8 @@ export interface ManifestVuln {
   title: string;
   severity: Severity;
   root_cause: string;
-  /** Harm modality; defaults to "state" when absent. */
-  harm?: Harm;
+  /** Harm modality; required — every label declares "state" or "availability". */
+  harm: Harm;
   /** True iff the entry ships `exploits/<id>.ts` (confirmed-tier for this vuln). */
   exploit?: boolean;
   /** True iff the entry ships `patches/<id>/` (attribution-ready). */
@@ -21,10 +21,15 @@ export interface ManifestVuln {
 }
 
 export interface Manifest {
+  /** Stable per-entry challenge id (`chal_<8 lowercase hex/base36 chars>`). */
+  id: string;
   /** Dataset schema version — bump on a breaking layout change. */
   version?: number;
   vulns: ManifestVuln[];
 }
+
+/** Format for the top-level entry id: `chal_` + 8 lowercase alphanumerics. */
+export const CHAL_ID_RE = /^chal_[0-9a-z]{8}$/;
 
 const SEVERITIES = new Set<Severity>(["critical", "high", "medium", "low"]);
 const HARMS = new Set<Harm>(["state", "availability"]);
@@ -45,7 +50,10 @@ export function parseManifest(raw: string, where: string): Manifest {
   }
   const vulns = obj.vulns.map((v, i) => parseVuln(v, `${where} vulns[${i}]`));
   assertUniqueIds(vulns, where);
-  const manifest: Manifest = { vulns };
+  const id = typeof obj.id === "string" ? obj.id : "";
+  if (!CHAL_ID_RE.test(id))
+    throw new Error(`${where}: "id" must match ${CHAL_ID_RE} (got ${JSON.stringify(obj.id)})`);
+  const manifest: Manifest = { id, vulns };
   if (obj.version !== undefined) {
     if (typeof obj.version !== "number")
       throw new Error(`${where}: "version" must be a number`);
@@ -65,18 +73,17 @@ function parseVuln(v: unknown, where: string): ManifestVuln {
   const severity = str("severity") as Severity;
   if (!SEVERITIES.has(severity))
     throw new Error(`${where}: invalid severity "${severity}"`);
+  const harm = str("harm") as Harm;
+  if (!HARMS.has(harm))
+    throw new Error(`${where}: invalid harm "${harm}"`);
   const vuln: ManifestVuln = {
     id: str("id"),
     module: str("module"),
     title: str("title"),
     severity,
     root_cause: str("root_cause"),
+    harm,
   };
-  if (o.harm !== undefined) {
-    if (!HARMS.has(o.harm as Harm))
-      throw new Error(`${where}: invalid harm "${String(o.harm)}"`);
-    vuln.harm = o.harm as Harm;
-  }
   if (o.exploit !== undefined) vuln.exploit = Boolean(o.exploit);
   if (o.patch !== undefined) vuln.patch = Boolean(o.patch);
   return vuln;

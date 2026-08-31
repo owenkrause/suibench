@@ -4,13 +4,14 @@ import type { EntryFiles } from "./types.js";
 
 const ENTRY: EntryFiles = {
   entry: {
+    id: "chal_00000001",
     version: 1,
-    vulns: [{ id: "admincap-leak", module: "vault", title: "AdminCap leaks", severity: "critical", root_cause: "mints a cap to any caller" }],
+    vulns: [{ id: "admincap-leak", module: "vault", title: "AdminCap leaks", severity: "critical", harm: "state", root_cause: "mints a cap to any caller" }],
   },
   files: {
     "Move.toml": `[package]\nname = "challenge"\n[addresses]\nchallenge = "0x0"\n`,
     "sources/vault.move": `module challenge::vault {\n  public struct AdminCap has key, store { id: UID }\n  public fun request_admin_status(ctx: &mut TxContext): AdminCap { AdminCap { id: object::new(ctx) } } // BUG\n}\n`,
-    "check.ts": `import { type Check, ownedObjects } from "core";\nexport const check: Check = (delta, params) => ownedObjects(delta.post, params.attackerAddress, \`\${params.packageId}::vault::AdminCap\`).length > 0;\n`,
+    "check.ts": `import { type Check, type CheckResult, ownedObjects } from "core";\nconst LABEL_ID = "admincap-leak" as const;\nexport const check: Check = (delta, params): CheckResult => { const witnessed = ownedObjects(delta.post, params.attackerAddress, \`\${params.packageId}::vault::AdminCap\`).length > 0; return { witnesses: witnessed ? [LABEL_ID] : [] }; };\n`,
     "exploits/admincap-leak.ts": `import { Transaction } from "@mysten/sui/transactions";\nexport async function attack(ctx: any) { const tx = new Transaction(); tx.moveCall({ target: \`\${ctx.packageId}::vault::request_admin_status\` }); }\n`,
     "entry.json": `{"version":1}`,
   },

@@ -10,16 +10,11 @@
 // balance recorded. This fixed-supply / zero-attacker starting position is what
 // makes the check's "attacker drained the reserve" predicate sound (see ./check.ts).
 import { Transaction } from "@mysten/sui/transactions";
-import type { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
 import type { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 
 interface SetupContext {
-  client: SuiJsonRpcClient & {
-    getOwnedObjects(input: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
+  client: SuiGrpcClient & {
     core: {
       signAndExecuteTransaction: (input: {
         transaction: Transaction;
@@ -39,12 +34,12 @@ interface SetupContext {
 // The admin (deployer) received the full 1_000_000 TOKEN supply in the token
 // module's `init`. Find that coin object by its owned StructType.
 async function findAdminToken(ctx: SetupContext): Promise<string> {
-  const owned = await ctx.client.getOwnedObjects({
+  const { objects } = await ctx.client.core.listOwnedObjects({
     owner: ctx.adminAddress,
-    filter: { StructType: `0x2::coin::Coin<${ctx.packageId}::token::TOKEN>` },
-    options: { showType: true },
+    type: `0x2::coin::Coin<${ctx.packageId}::token::TOKEN>`,
+    include: { json: true },
   });
-  const id = owned.data[0]?.data?.objectId;
+  const id = objects[0]?.objectId;
   if (!id) throw new Error("setup: admin holds no TOKEN coin");
   return id;
 }

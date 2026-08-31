@@ -7,13 +7,12 @@ import { existsSync, statSync, readdirSync, mkdtempSync, mkdirSync, rmSync } fro
 import type { RunScore, RunEnv } from "core";
 import { loadEntry, type DatasetEntry } from "../src/dataset/index.js";
 import { benchEntry, type BenchDeps, type RunConfig } from "../src/bench/driver.js";
-import { scriptedPolicyFactory } from "../src/bench/policies.js";
 import { Confirmer } from "../src/adapters/confirmer.js";
 import { SandboxManager } from "../src/adapters/sandbox.js";
 import { boundedMap } from "../src/util/bounded.js";
 import { readEntryFiles, writeTwinDir, twinSeed } from "../src/bench/materialize.js";
 import { generateTwin } from "../src/perturbation/transform.js";
-import { buildReferenceActions } from "./verify-graders.js"; // reuse the exact ref-exploit builder
+import { referenceRun, noopSink } from "./verify-graders.js"; // reuse the exact ref-exploit builder
 
 const K = Number(process.env.SUIBENCH_TWINS ?? "3");
 
@@ -28,7 +27,7 @@ export function evaluateTwinGate(o: RunScore, t: RunScore): { pass: boolean; rea
   const reasons: string[] = [];
   const both = (pred: (m: RunScore["metrics"]) => boolean, msg: string) => { if (!(pred(o.metrics) && pred(t.metrics))) reasons.push(msg); };
   both((m) => m.labels_total > 0 && m.labels_hit === m.labels_total, "not every label HIT on both sides");
-  both((m) => m.findings_total > 0 && m.true_positives === m.findings_total && m.false_positives === 0, "not perfectly confirmed on both sides");
+  both((m) => m.findings_total > 0 && m.true_positives === m.findings_total && m.false_positives === 0 && m.unattributed_findings === 0, "not perfectly confirmed on both sides");
   // Cardinality must be identical: a twin only renames symbols, so its label/finding
   // counts must match the original. A drift here means the twin transform altered the
   // graded shape — exactly what this gate exists to catch.
@@ -41,8 +40,9 @@ export function evaluateTwinGate(o: RunScore, t: RunScore): { pass: boolean; rea
 async function scoreEntry(entry: DatasetEntry, manager: SandboxManager, env: RunEnv): Promise<RunScore> {
   const config: RunConfig = { harness: "harnessed", axis: "exploitation", env, k: 1 };
   const deps: BenchDeps = {
-    policyFor: scriptedPolicyFactory({ [entry.target]: buildReferenceActions(entry) }),
+    runFor: referenceRun(entry),
     graderFor: (e) => new Confirmer(manager, e.harness),
+    sink: noopSink,
   };
   return (await benchEntry(entry, config, deps)).run;
 }
@@ -77,7 +77,7 @@ export async function main(): Promise<number> {
   const dirs = confirmedTierDirs(resolve(import.meta.dirname, "../dataset"));
   if (dirs.length === 0) { console.error("verify:twins — no confirmed-tier entries"); return 1; }
   const manager = new SandboxManager();
-  const env: RunEnv = { network: "devnet", model: "none", effort: "low" };
+  const env: RunEnv = { model: "none", effort: "low" };
   try {
     const results = await boundedMap(dirs, 3, (d) => verifyEntry(d, manager, env));
     let failed = 0;

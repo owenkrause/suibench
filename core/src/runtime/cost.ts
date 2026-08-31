@@ -3,10 +3,10 @@
 // count at ~10% of input cost, cache creation at full input cost, so
 // `inputTokens` approximates billable cost rather than raw prefix size.
 //
-// TURNS are NOT metered here. A turn is an auditor-specific notion (one
-// model↔tool round-trip); the send seam has no concept of it. The `AuditorPolicy`
-// meters turns explicitly (`meter.tick()`), keeping the send-seam meter reusable
-// by any consumer that isn't turn-structured.
+// TURNS are NOT metered here. A turn is a loop-specific notion (one model↔tool
+// round-trip); the send seam has no concept of it. The agent loop meters turns
+// explicitly (`meter.tick()`), keeping the send-seam meter reusable by any
+// consumer that isn't turn-structured.
 import type {
   ModelClient,
   ModelRequest,

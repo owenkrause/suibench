@@ -4,8 +4,9 @@
 // The legitimate LP flow: deposit 50000, then withdraw exactly the 50000
 // principal. A fair withdrawal takes back only what was deposited — no skim
 // of the pool's other capital — so the attacker's net over their own stake is
-// 0 (buggy contract) or -2500 (correct contract, penalty withheld). Either
-// way this is well under the exploit threshold and must NOT trip the check.
+// 0 (buggy contract) or -2500 (correct contract, penalty withheld). This is a
+// compile/non-abort control: its event is not supplied as attack evidence to
+// `check.ts` during gold-patch verification.
 //
 // This file exports `attack(ctx)` — the same AttackContext shape the
 // confirmer's in-container runner (src/confirmer/runner.ts) invokes — so the
@@ -13,76 +14,43 @@
 // an alias for readability at the call site; the runner only ever calls
 // `attack`.
 import { Transaction } from "@mysten/sui/transactions";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
+import type { Signer } from "@mysten/sui/cryptography";
+interface NativeChain {
+  findCreatedObjects(sender: string): Promise<
+    readonly { id: string; type: string; digest: string; checkpoint: bigint }[]
+  >;
+}
+
 
 interface FunctionalContext {
-  client: {
-    getOwnedObjects(i: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
-    queryTransactionBlocks(i: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: {
-        objectChanges?: {
-          type: string;
-          objectType?: string;
-          objectId?: string;
-        }[];
-      }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
-    core: {
-      signAndExecuteTransaction: (i: {
-        transaction: Transaction;
-        signer: unknown;
-        include?: unknown;
-      }) => Promise<unknown>;
-      waitForTransaction: (i: { result: unknown }) => Promise<unknown>;
-    };
-  };
+  client: SuiGrpcClient;
+  chain: NativeChain;
   packageId: string;
-  attacker: unknown;
+  attacker: Signer;
   attackerAddress: string;
   adminAddress: string;
 }
 
 async function findPool(ctx: FunctionalContext): Promise<string> {
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: ctx.adminAddress },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data)
-      for (const c of tx.objectChanges ?? [])
-        if (
-          c.type === "created" &&
-          c.objectType === `${ctx.packageId}::liquidity_provider::Pool` &&
-          c.objectId
-        )
-          return c.objectId;
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
+  const type = `${ctx.packageId}::liquidity_provider::Pool`;
+  const created = await ctx.chain.findCreatedObjects(ctx.adminAddress);
+  for (const object of created) {
+    if (object.type === type) return object.id;
+  }
   throw new Error("functional: Pool not found");
 }
 async function findCoin(ctx: FunctionalContext): Promise<string> {
-  const owned = await ctx.client.getOwnedObjects({
+  const owned = await ctx.client.core.listOwnedObjects({
     owner: ctx.attackerAddress,
-    filter: { StructType: `0x2::coin::Coin<${ctx.packageId}::asset::ASSET>` },
-    options: { showType: true },
+    type: `0x2::coin::Coin<${ctx.packageId}::asset::ASSET>`,
   });
-  const id = owned.data[0]?.data?.objectId;
+  const id = owned.objects[0]?.objectId;
   if (!id) throw new Error("functional: attacker holds no ASSET");
   return id;
 }
 
-export async function attack(ctx: FunctionalContext): Promise<void> {
+export async function functional(ctx: FunctionalContext): Promise<void> {
   const pool = await findPool(ctx);
   const coin = await findCoin(ctx);
   const tx = new Transaction();
@@ -104,6 +72,3 @@ export async function attack(ctx: FunctionalContext): Promise<void> {
   });
   await ctx.client.core.waitForTransaction({ result: res });
 }
-
-/** Readable alias — the confirmer runner only ever calls `attack`. */
-export const functional = attack;

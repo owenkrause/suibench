@@ -1,6 +1,6 @@
-# suibench-base: Heavy toolchain image (Sui CLI + sui-prover + Boogie + Z3 + Node)
+# suixploit-base: Heavy toolchain image (Sui CLI + sui-prover + Boogie + Z3 + Node)
 # Rebuild only when bumping tool versions:
-#   docker build -f Dockerfile.base -t suibench-base .
+#   docker build -f Dockerfile.base -t suixploit-base .
 
 # ── Stage 1: Build sui-prover + Boogie from source ──────────────
 FROM ubuntu:24.04 AS prover-builder

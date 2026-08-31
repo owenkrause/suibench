@@ -6,31 +6,16 @@
 // check measures only what the taker later pulls out. The attacker (taker) is left with
 // no ASSET; both the benign fair fill and the over-fill happen in the attack scripts.
 import { Transaction } from "@mysten/sui/transactions";
-import type { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
 import type { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 
+interface CreatedObject {
+  readonly id: string;
+  readonly type: string;
+}
+
 interface SetupContext {
-  client: SuiJsonRpcClient & {
-    getOwnedObjects(input: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
-    queryTransactionBlocks(i: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: {
-        objectChanges?: {
-          type: string;
-          objectType?: string;
-          objectId?: string;
-        }[];
-      }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
+  client: SuiGrpcClient & {
     core: {
       signAndExecuteTransaction: (i: {
         transaction: Transaction;
@@ -39,6 +24,9 @@ interface SetupContext {
       }) => Promise<{ $kind?: string }>;
       waitForTransaction: (i: { result: unknown }) => Promise<unknown>;
     };
+  };
+  chain: {
+    findCreatedObjects(sender: string): Promise<readonly CreatedObject[]>;
   };
   packageId: string;
   admin: Ed25519Keypair;
@@ -50,30 +38,21 @@ async function findCreated(
   ctx: SetupContext,
   objectType: string,
 ): Promise<string> {
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: ctx.adminAddress },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data)
-      for (const c of tx.objectChanges ?? [])
-        if (c.type === "created" && c.objectType === objectType && c.objectId)
-          return c.objectId;
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
+  const object = (await ctx.chain.findCreatedObjects(ctx.adminAddress)).find(
+    (created) => created.type === objectType,
+  );
+  if (object) return object.id;
   throw new Error(`setup: object of type ${objectType} not found`);
 }
 
 export async function setup(ctx: SetupContext): Promise<void> {
   const ASSET = `${ctx.packageId}::asset::ASSET`;
-  const owned = await ctx.client.getOwnedObjects({
+  const { objects } = await ctx.client.core.listOwnedObjects({
     owner: ctx.adminAddress,
-    filter: { StructType: `0x2::coin::Coin<${ASSET}>` },
-    options: { showType: true },
+    type: `0x2::coin::Coin<${ASSET}>`,
+    include: { json: true },
   });
-  const adminCoin = owned.data[0]?.data?.objectId;
+  const adminCoin = objects[0]?.objectId;
   if (!adminCoin) throw new Error("setup: admin holds no ASSET");
 
   // Open the maker's Manager funded with 100_000 base, and place an order of quantity 10_000.

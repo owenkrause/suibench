@@ -1,4 +1,4 @@
-module integer_mate::math_u256 {
+module math_lib::math_u256 {
     const MASK_U128: u256 = 0x00000000000000000000000000000000ffffffffffffffffffffffffffffffff;
     const MASK_U64: u256  = 0x000000000000000000000000000000000000000000000000ffffffffffffffff;
 
@@ -8,15 +8,15 @@ module integer_mate::math_u256 {
         (p, r)
     }
 
-    public fun shlw(n: u256): u256 {
+    public fun shl_64(n: u256): u256 {
         n << 64
     }
 
-    public fun shrw(n: u256): u256 {
+    public fun shr_64(n: u256): u256 {
         n >> 64
     }
 
-    public fun checked_shlw(n: u256): (u256, bool) {
+    public fun checked_shl_64(n: u256): (u256, bool) {
         let mask = 1 << 192;
         if (n >= mask) {
             (0, true)
