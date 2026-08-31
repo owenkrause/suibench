@@ -78,6 +78,8 @@ function microMetrics(entries: EntryScore[]): ScoreMetrics {
   let findingsTotal = 0;
   let truePositives = 0;
   let falsePositives = 0;
+  let unattributedFindings = 0;
+  let confirmedTruePositives = 0;
   // severity_accuracy pools its own raw numerator/denominator — no float
   // round-trip, and the denominator varies by tier (carried in ScoreMetrics).
   let sevTotal = 0;
@@ -92,6 +94,8 @@ function microMetrics(entries: EntryScore[]): ScoreMetrics {
     findingsTotal += m.findings_total;
     truePositives += m.true_positives;
     falsePositives += m.false_positives;
+    unattributedFindings += m.unattributed_findings;
+    if (m.tier === "confirmed") confirmedTruePositives += m.true_positives;
     sevTotal += m.severity_total;
     sevCorrect += m.severity_correct;
   }
@@ -104,8 +108,16 @@ function microMetrics(entries: EntryScore[]): ScoreMetrics {
     findings_total: findingsTotal,
     true_positives: truePositives,
     false_positives: falsePositives,
+    unattributed_findings: unattributedFindings,
     recall: labelsTotal === 0 ? null : labelsHit / labelsTotal,
-    precision: findingsTotal === 0 ? null : truePositives / findingsTotal,
+    precision:
+      truePositives + falsePositives === 0
+        ? null
+        : truePositives / (truePositives + falsePositives),
+    attribution_rate:
+      confirmedTruePositives + unattributedFindings === 0
+        ? null
+        : confirmedTruePositives / (confirmedTruePositives + unattributedFindings),
     severity_accuracy: sevTotal === 0 ? null : sevCorrect / sevTotal,
     severity_correct: sevCorrect,
     severity_total: sevTotal,
@@ -128,8 +140,10 @@ function macroMetrics(entries: EntryScore[]): ScoreMetrics {
     findings_total: ms.reduce((a, m) => a + m.findings_total, 0),
     true_positives: ms.reduce((a, m) => a + m.true_positives, 0),
     false_positives: ms.reduce((a, m) => a + m.false_positives, 0),
+    unattributed_findings: ms.reduce((a, m) => a + m.unattributed_findings, 0),
     recall: meanOrNull(ms.map((m) => m.recall)),
     precision: meanOrNull(ms.map((m) => m.precision)),
+    attribution_rate: meanOrNull(ms.map((m) => m.attribution_rate)),
     severity_accuracy: meanOrNull(ms.map((m) => m.severity_accuracy)),
     severity_correct: ms.reduce((a, m) => a + m.severity_correct, 0),
     severity_total: ms.reduce((a, m) => a + m.severity_total, 0),

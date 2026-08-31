@@ -1,8 +1,9 @@
 // A small composition factory. It does NOT reimplement the N+1 loop — that's the
 // kernel's `runCounterfactuals` + `attribute`. It builds each variant's `Mount`
 // (overlay the label's patch files; `null` = vulnerable build) and reduces the
-// `ChainDelta` through the entry `Check` to a boolean. `baseProof` keeps each
-// base run's proof for the `confirmed` verdict.
+// `ChainDelta` + attack-phase evidence through the entry `Check`, via the
+// authoring guard `runCheck`, to a `CheckResult`. `baseProof` keeps each base
+// run's proof for the `confirmed` verdict.
 import type {
   Grader,
   GraderResult,
@@ -10,10 +11,11 @@ import type {
   MoveFile,
   ChainSnapshot,
   Check,
+  CheckResult,
   CounterfactualBoundary,
   CounterfactualLabel,
 } from "core";
-import { sanitize } from "core";
+import { sanitize, runCheck } from "core";
 import { InfraError } from "./confirmer.js";
 
 /** Attempts per variant boot before an infra failure is given up on. */
@@ -42,7 +44,11 @@ export interface BoundaryDeps {
   vulnerableMount: Mount;
   readScript: (exploitPath: string) => MoveFile;
   check: Check;
-  /** Entry target, for the infra-failure log lines. */
+  /** The entry's full manifest vulnerability-id universe — the `runCheck`
+   *  authoring guard's allowed-witness set. Every manifest vuln id, not only
+   *  the ids inferred from an outcome or the labels being patched. */
+  allowedWitnessIds: readonly string[];
+  /** Entry target, for the infra-failure log lines and the `runCheck` context. */
   label: string;
 }
 
@@ -70,8 +76,8 @@ async function gradeWithRetry(
 }
 
 // `runCounterfactuals` drives `runOnVariant` (base, then per-label) — this factory
-// owns none of that control flow. `baseProof` holds each base run's proof (iff it
-// passed) for the `confirmed` verdict.
+// owns none of that control flow. `baseProof` holds each base run's proof (iff
+// the base witness set is nonempty) for the `confirmed` verdict.
 export function counterfactualBoundary(deps: BoundaryDeps): {
   boundary: CounterfactualBoundary<PatchedLabel>;
   baseProof: Map<string, ChainSnapshot | null>;
@@ -83,16 +89,27 @@ export function counterfactualBoundary(deps: BoundaryDeps): {
       _entryDir: string,
       exploitPath: string,
       patch: PatchedLabel | null,
-    ): Promise<boolean> => {
+    ): Promise<CheckResult> => {
       const mount = variantMount(deps.vulnerableMount, patch);
       const script = deps.readScript(exploitPath);
-      // The grader boots the localnet + runs setup, so it owns BOTH the
-      // ChainDelta (pre = post-setup baseline, post = post-attack) and the
-      // per-boot CheckParams (freshly-published packageId + funded addresses).
-      const { delta, params } = await gradeWithRetry(deps, mount, script);
-      const passed = deps.check(delta, params);
-      if (patch === null) baseProof.set(exploitPath, passed ? delta.post : null);
-      return passed;
+      // The grader boots the localnet + runs setup, so it owns the ChainDelta
+      // (pre = post-setup baseline, post = post-attack), the per-boot
+      // CheckParams (freshly-published packageId + funded addresses), AND the
+      // attack-phase CheckEvidence — all three are passed through `runCheck`
+      // unchanged, the ONLY helper allowed to invoke `deps.check`.
+      const { delta, params, evidence } = await gradeWithRetry(deps, mount, script);
+      const result = runCheck(
+        deps.check,
+        deps.allowedWitnessIds,
+        delta,
+        params,
+        evidence,
+        `${deps.label}/${patch?.id ?? "base"}`,
+      );
+      if (patch === null) {
+        baseProof.set(exploitPath, result.witnesses.length > 0 ? delta.post : null);
+      }
+      return result;
     },
   };
 

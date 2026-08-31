@@ -1,4 +1,5 @@
 {
+  "id": "chal_f607625a",
   "version": 1,
   "vulns": [
     {
@@ -6,6 +7,7 @@
       "module": "admin",
       "title": "claim_admin accepts any UpgradeCap without verifying it governs this package",
       "severity": "critical",
+      "harm": "state",
       "root_cause": "claim_admin gates the minting of a privileged AdminCap on the caller presenting an `&sui::package::UpgradeCap` — the intent being that only this package's deployer, who holds this package's UpgradeCap, can claim admin. But it never checks the cap's identity: it does not verify `sui::package::upgrade_package(cap)` equals this package's own id, and it does not consume/mark the cap. An UpgradeCap is not a secret shared only with the deployer — every published package produces its own UpgradeCap for its publisher, so ANY account can publish a throwaway package, obtain a perfectly valid UpgradeCap for it, and pass that to claim_admin. The check looks like authorization (you must show 'an' upgrade cap) but authorizes nothing, because the universe of UpgradeCap holders is everyone. The attacker mints an AdminCap and drains the shared Treasury via the admin-gated withdraw. The fix is to bind the cap to this package: assert `package::upgrade_package(cap)` matches the expected package id (and treat the presence of merely 'an' UpgradeCap as no proof of authority).",
       "exploit": true,
       "patch": true

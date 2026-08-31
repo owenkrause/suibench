@@ -54,6 +54,8 @@ describe("scoreDetect — judge ONLY (no exploit, no attribution)", () => {
     expect(r.labels[0].status).toBe("HIT");
     expect(r.metrics.tier).toBe("detect");
     expect(r.metrics.true_positives).toBe(1);
+    expect(r.metrics.unattributed_findings).toBe(0);
+    expect(r.metrics.attribution_rate).toBeNull();
     expect(r.metrics.recall).toBe(1);
   });
 
@@ -172,44 +174,66 @@ describe("scoreConfirmed — attribution ONLY (no judge)", () => {
     finding({ id: `F${i + 1}`, title: t }),
   );
 
-  it("recall = |confirmedLabels| / labels_total", () => {
+  it("scores attributed, refuted, and unattributed findings separately", () => {
     const attribution: Attribution = {
-      perExploit: { F1: ["a"], F2: ["b"], F3: [] },
+      perExploit: {
+        F1: { kind: "attributed", labels: ["a"] },
+        F2: { kind: "attributed", labels: ["b"] },
+        F3: { kind: "unattributed", labels: [] },
+        F4: { kind: "refuted", labels: [] },
+      },
       confirmedLabels: ["a", "b"],
     };
+
     const r = scoreConfirmed(findings, gt3, attribution);
-    expect(r.metrics.tier).toBe("confirmed");
+
+    expect(r.metrics).toMatchObject({
+      tier: "confirmed",
+      findings_total: 4,
+      true_positives: 2,
+      false_positives: 1,
+      unattributed_findings: 1,
+    });
     expect(r.metrics.recall).toBeCloseTo(2 / 3);
+    expect(r.metrics.precision).toBeCloseTo(2 / 3);
+    expect(r.metrics.attribution_rate).toBeCloseTo(2 / 3);
+    expect(r.findings.map((result) => [result.id, result.classification, result.confirmed]))
+      .toEqual([
+        ["F1", "TP", true],
+        ["F2", "TP", true],
+        ["F3", "UNATTRIBUTED", true],
+        ["F4", "FP", false],
+      ]);
   });
 
-  it("precision = attributed / exploitCarrying; empty perExploit is the FP", () => {
-    // F1,F2 attributed; F3 (patch-invariant) + F4 (base=false) both EMPTY.
+  it("only base rejection counts as a false positive", () => {
     const attribution: Attribution = {
-      perExploit: { F1: ["a"], F2: ["b"], F3: [], F4: [] },
-      confirmedLabels: ["a", "b"],
+      perExploit: {
+        F3: { kind: "unattributed", labels: [] },
+        F4: { kind: "refuted", labels: [] },
+      },
+      confirmedLabels: [],
     };
     const r = scoreConfirmed(findings, gt3, attribution);
-    expect(r.metrics.findings_total).toBe(4); // exploit-carrying
-    expect(r.metrics.true_positives).toBe(2); // attributed
-    expect(r.metrics.false_positives).toBe(2); // F3 + F4, empty perExploit
-    expect(r.metrics.precision).toBeCloseTo(2 / 4);
+
+    expect(r.metrics.false_positives).toBe(1);
+    expect(r.metrics.unattributed_findings).toBe(1);
+    expect(r.findings.find((result) => result.id === "F3")?.classification)
+      .toBe("UNATTRIBUTED");
+    expect(r.findings.find((result) => result.id === "F4")?.classification)
+      .toBe("FP");
   });
 
-  it("a base=false exploit AND a base=true-patch-invariant exploit BOTH count as false_positives", () => {
-    // F1 attributes to a; F3 is patch-invariant (base=true, no patch broke it);
-    // F4 never worked (base=false). Both F3 and F4 have EMPTY perExploit.
+  it("excludes unattributed findings from precision and recall", () => {
     const attribution: Attribution = {
-      perExploit: { F1: ["a"], F3: [], F4: [] },
-      confirmedLabels: ["a"],
+      perExploit: { F3: { kind: "unattributed", labels: [] } },
+      confirmedLabels: [],
     };
     const r = scoreConfirmed(findings, gt3, attribution);
-    expect(r.metrics.true_positives).toBe(1);
-    expect(r.metrics.false_positives).toBe(2);
-    const fps = r.findings
-      .filter((f) => f.classification === "FP")
-      .map((f) => f.id)
-      .sort();
-    expect(fps).toEqual(["F3", "F4"]);
+
+    expect(r.metrics.precision).toBeNull();
+    expect(r.metrics.recall).toBe(0);
+    expect(r.metrics.attribution_rate).toBe(0);
   });
 
   it("severity_accuracy = exploit severity vs attributed label severity", () => {
@@ -219,7 +243,7 @@ describe("scoreConfirmed — attribution ONLY (no judge)", () => {
     };
     // exploit F1 (severity high) attributes to a (critical) -> wrong.
     const attribution: Attribution = {
-      perExploit: { F1: ["a"] },
+      perExploit: { F1: { kind: "attributed", labels: ["a"] } },
       confirmedLabels: ["a"],
     };
     const f = [finding({ id: "F1", severity: "high" })];
@@ -232,13 +256,14 @@ describe("scoreConfirmed — attribution ONLY (no judge)", () => {
     const r = scoreConfirmed(findings, gt3, empty);
     expect(r.metrics.recall).toBe(0);
     expect(r.metrics.precision).toBeNull();
+    expect(r.metrics.attribution_rate).toBeNull();
     expect(r.metrics.severity_accuracy).toBeNull();
   });
 
   it("the judge is never consulted (attribution is the sole grader)", async () => {
     const judgeSpy = vi.fn(async () => 0);
     const attribution: Attribution = {
-      perExploit: { F1: ["a"] },
+      perExploit: { F1: { kind: "attributed", labels: ["a"] } },
       confirmedLabels: ["a"],
     };
     const r = await scoreFindings(findings, gt3, judgeSpy, true, attribution);

@@ -1,5 +1,30 @@
 import { Transaction } from "@mysten/sui/transactions";
 
+interface CreatedObject {
+  readonly id: string;
+  readonly type: string;
+}
+
+interface VictimContext {
+  client: {
+    core: {
+      signAndExecuteTransaction(input: {
+        transaction: Transaction;
+        signer: unknown;
+        include?: unknown;
+      }): Promise<unknown>;
+    };
+  };
+  chain: {
+    findCreatedObjects(sender: string): Promise<readonly CreatedObject[]>;
+  };
+  packageId: string;
+  attackerAddress: string;
+  adminAddress: string;
+  user: unknown;
+  userAddress: string;
+}
+
 // The designated victim op V: the beneficiary's entirely valid withdraw from the
 // committed Vesting. On the vulnerable package, whenever the committed allocation
 // encodes period_length == 0 (the solution's state), `elapsed_time / period_length`
@@ -12,30 +37,20 @@ import { Transaction } from "@mysten/sui/transactions";
 // the `sender == beneficiary` check and reaches the division. Host-side hook.
 
 // Any Vesting the exploit created was sent by one of the three keypairs the
-// attack script holds (attacker/admin/user), so paginating all three is a
-// COMPLETE search — a null result means no such Vesting exists (an incomplete or
-// failed exploit), not that we looked in the wrong place or missed a page.
-async function findVesting(ctx: any): Promise<string | null> {
+// attack script holds. Chain discovery covers each sender's created objects, so
+// a null result means no such Vesting exists (an incomplete or failed exploit).
+async function findVesting(ctx: VictimContext): Promise<string | null> {
   const type = `${ctx.packageId}::vesting::Vesting`;
   for (const from of [ctx.attackerAddress, ctx.adminAddress, ctx.userAddress]) {
-    let cursor: string | null | undefined;
-    do {
-      const page = await ctx.client.queryTransactionBlocks({
-        filter: { FromAddress: from },
-        options: { showObjectChanges: true },
-        cursor,
-      });
-      for (const tx of page.data)
-        for (const ch of tx.objectChanges ?? [])
-          if (ch.type === "created" && ch.objectType === type && ch.objectId)
-            return ch.objectId;
-      cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-    } while (cursor);
+    const vesting = (await ctx.chain.findCreatedObjects(from)).find(
+      (object) => object.type === type,
+    );
+    if (vesting) return vesting.id;
   }
   return null;
 }
 
-export async function victim(ctx: any): Promise<unknown> {
+export async function victim(ctx: VictimContext): Promise<unknown> {
   const vesting = await findVesting(ctx);
   // No malicious Vesting exists → the exploit never set up the div-by-zero DoS
   // (a failed/incorrect attempt). The beneficiary's withdraw has nothing to
@@ -47,7 +62,7 @@ export async function victim(ctx: any): Promise<unknown> {
   const tx = new Transaction();
   tx.setSender(ctx.userAddress);
   tx.setGasBudget(
-    Number(process.env.SUIBENCH_VICTIM_GAS_BUDGET ?? "50000000"),
+    Number(process.env.SUIXPLOIT_VICTIM_GAS_BUDGET ?? "50000000"),
   );
   const coin = tx.moveCall({
     target: `${ctx.packageId}::vesting::withdraw`,

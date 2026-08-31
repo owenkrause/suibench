@@ -20,64 +20,33 @@
 // Exports `attack(ctx)` (the confirmer runner's contract); `functional` is an alias.
 import { Transaction } from "@mysten/sui/transactions";
 import { SUI_CLOCK_OBJECT_ID } from "@mysten/sui/utils";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
+import type { Signer } from "@mysten/sui/cryptography";
+interface NativeChain {
+  findCreatedObjects(sender: string): Promise<
+    readonly { id: string; type: string; digest: string; checkpoint: bigint }[]
+  >;
+}
+
 
 interface Ctx {
-  client: {
-    getOwnedObjects(i: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
-    queryTransactionBlocks(i: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: {
-        objectChanges?: {
-          type: string;
-          objectType?: string;
-          objectId?: string;
-        }[];
-      }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
-    core: {
-      signAndExecuteTransaction: (i: {
-        transaction: Transaction;
-        signer: unknown;
-        include?: unknown;
-      }) => Promise<{ $kind?: string }>;
-      waitForTransaction: (i: { result: unknown }) => Promise<unknown>;
-    };
-  };
+  client: SuiGrpcClient;
+  chain: NativeChain;
   packageId: string;
-  attacker: unknown;
+  attacker: Signer;
   attackerAddress: string;
-  admin: unknown;
+  admin: Signer;
   adminAddress: string;
-  user: unknown;
+  user: Signer;
   userAddress: string;
 }
 
 async function findAttackerAuction(ctx: Ctx): Promise<string> {
   const auctionType = `${ctx.packageId}::auction::Auction`;
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: ctx.attackerAddress },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data) {
-      for (const c of tx.objectChanges ?? []) {
-        if (c.type === "created" && c.objectType === auctionType && c.objectId)
-          return c.objectId;
-      }
-    }
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
+  const created = await ctx.chain.findCreatedObjects(ctx.attackerAddress);
+  for (const object of created) {
+    if (object.type === auctionType) return object.id;
+  }
   throw new Error("functional: attacker Auction not found");
 }
 
@@ -86,17 +55,16 @@ async function findCoin(
   owner: string,
   structType: string,
 ): Promise<string> {
-  const owned = await ctx.client.getOwnedObjects({
-    owner,
-    filter: { StructType: structType },
-    options: { showType: true },
+  const owned = await ctx.client.core.listOwnedObjects({
+    owner: owner,
+    type: structType,
   });
-  const id = owned.data[0]?.data?.objectId;
+  const id = owned.objects[0]?.objectId;
   if (!id) throw new Error(`functional: ${owner} holds no ${structType}`);
   return id;
 }
 
-export async function attack(ctx: Ctx): Promise<void> {
+export async function functional(ctx: Ctx): Promise<void> {
   const auction = await findAttackerAuction(ctx);
   const assetCoinType = `0x2::coin::Coin<${ctx.packageId}::asset::ASSET>`;
 
@@ -160,4 +128,3 @@ export async function attack(ctx: Ctx): Promise<void> {
   await ctx.client.core.waitForTransaction({ result: settleRes });
 }
 
-export const functional = attack;

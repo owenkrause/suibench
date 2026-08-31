@@ -5,40 +5,18 @@
 // inside the attack scripts (not here), so the pre-state snapshot captures the
 // attacker's full 50000 liquid balance and the check measures true NET profit.
 import { Transaction } from "@mysten/sui/transactions";
-import type { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
 import type { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
+interface NativeChain {
+  findCreatedObjects(sender: string): Promise<
+    readonly { id: string; type: string; digest: string; checkpoint: bigint }[]
+  >;
+}
+
 
 interface SetupContext {
-  client: SuiJsonRpcClient & {
-    getOwnedObjects(i: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
-    queryTransactionBlocks(i: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: {
-        objectChanges?: {
-          type: string;
-          objectType?: string;
-          objectId?: string;
-        }[];
-      }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
-    core: {
-      signAndExecuteTransaction: (i: {
-        transaction: Transaction;
-        signer: unknown;
-        include?: unknown;
-      }) => Promise<{ $kind?: string }>;
-      waitForTransaction: (i: { result: unknown }) => Promise<unknown>;
-    };
-  };
+  client: SuiGrpcClient;
+  chain: NativeChain;
   packageId: string;
   admin: Ed25519Keypair;
   adminAddress: string;
@@ -50,19 +28,10 @@ async function findShared(
   from: string,
   type: string,
 ): Promise<string> {
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: from },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data)
-      for (const c of tx.objectChanges ?? [])
-        if (c.type === "created" && c.objectType === type && c.objectId)
-          return c.objectId;
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
+  const created = await ctx.chain.findCreatedObjects(from);
+  for (const object of created) {
+    if (object.type === type) return object.id;
+  }
   throw new Error(`setup: ${type} not found`);
 }
 
@@ -73,12 +42,11 @@ export async function setup(ctx: SetupContext): Promise<void> {
     ctx.adminAddress,
     `${ctx.packageId}::liquidity_provider::Pool`,
   );
-  const owned = await ctx.client.getOwnedObjects({
+  const owned = await ctx.client.core.listOwnedObjects({
     owner: ctx.adminAddress,
-    filter: { StructType: `0x2::coin::Coin<${ASSET}>` },
-    options: { showType: true },
+    type: `0x2::coin::Coin<${ASSET}>`,
   });
-  const adminCoin = owned.data[0]?.data?.objectId;
+  const adminCoin = owned.objects[0]?.objectId;
   if (!adminCoin) throw new Error("setup: admin holds no ASSET");
 
   const tx = new Transaction();

@@ -23,6 +23,10 @@ gets their collateral credited for free, and withdraws the fabricated balance â€
   `Exchange` vault so the inflated collateral converts to a real SUI withdrawal. (The real Aftermath code
   uses a custom `I64`-style signed integer; this models the same missing-non-negativity check with a minimal
   signed representation.)
+- **Fidelity addition (both builds):** collected positive fees now accrue to `Exchange.protocol_fees` and are
+  swept by an `AdminCap`-gated `collect_fees` (cap minted to the deployer at init), so legitimately-charged
+  fees have a real destination instead of being permanently locked in the vault. The labeled bug (missing
+  sign check in `settle_fee`) is unchanged.
 
 ## Decontamination
 - Package/address `challenge`; module `perp`. No vuln/incident/fix-naming comments in `sources/` (the bug is

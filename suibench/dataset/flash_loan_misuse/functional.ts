@@ -27,20 +27,11 @@ import { Transaction } from "@mysten/sui/transactions";
 
 const LOAN_AMOUNT = 1000n;
 
-interface ObjectChange {
-  type: string;
-  objectType?: string;
-  objectId?: string;
-}
-
-interface TxPage {
-  data: { objectChanges?: ObjectChange[] | null }[];
-  hasNextPage: boolean;
-  nextCursor?: string | null;
-}
-
-interface OwnedObjectsPage {
-  data: { data?: { objectId?: string } }[];
+interface CreatedObject {
+  readonly id: string;
+  readonly type: string;
+  readonly digest: string;
+  readonly checkpoint: bigint;
 }
 
 interface FunctionalContext {
@@ -52,17 +43,17 @@ interface FunctionalContext {
         include?: unknown;
       }) => Promise<{ $kind?: string; FailedTransaction?: unknown }>;
       waitForTransaction: (input: { result: unknown }) => Promise<unknown>;
+      listOwnedObjects(input: {
+        owner: string;
+        type?: string;
+        include?: { json?: boolean };
+      }): Promise<{
+        objects: { objectId: string; type: string; json?: unknown }[];
+      }>;
     };
-    queryTransactionBlocks(input: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<TxPage>;
-    getOwnedObjects(input: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<OwnedObjectsPage>;
+  };
+  chain: {
+    findCreatedObjects(sender: string): Promise<readonly CreatedObject[]>;
   };
   packageId: string;
   attacker: unknown;
@@ -78,26 +69,10 @@ async function findPool(ctx: FunctionalContext): Promise<string> {
     ctx.attackerAddress,
     ctx.userAddress,
   ]) {
-    let cursor: string | null | undefined;
-    do {
-      const page = await ctx.client.queryTransactionBlocks({
-        filter: { FromAddress: owner },
-        options: { showObjectChanges: true },
-        cursor,
-      });
-      for (const tx of page.data) {
-        for (const change of tx.objectChanges ?? []) {
-          if (
-            change.type === "created" &&
-            change.objectType === want &&
-            change.objectId
-          ) {
-            return change.objectId;
-          }
-        }
-      }
-      cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-    } while (cursor);
+    const pool = (await ctx.chain.findCreatedObjects(owner)).find(
+      (object) => object.type === want,
+    );
+    if (pool) return pool.id;
   }
   throw new Error(
     `functional: could not locate shared LendingPool for package ${ctx.packageId}`,
@@ -106,12 +81,12 @@ async function findPool(ctx: FunctionalContext): Promise<string> {
 
 async function findAttackerAssetCoin(ctx: FunctionalContext): Promise<string> {
   const coinType = `0x2::coin::Coin<${ctx.packageId}::lending_pool::LENDING_POOL>`;
-  const owned = await ctx.client.getOwnedObjects({
+  const { objects } = await ctx.client.core.listOwnedObjects({
     owner: ctx.attackerAddress,
-    filter: { StructType: coinType },
-    options: { showType: true },
+    type: coinType,
+    include: { json: true },
   });
-  const id = owned.data[0]?.data?.objectId;
+  const id = objects[0]?.objectId;
   if (!id)
     throw new Error(
       "functional: attacker does not hold an ASSET coin to repay with",
@@ -119,7 +94,7 @@ async function findAttackerAssetCoin(ctx: FunctionalContext): Promise<string> {
   return id;
 }
 
-export async function attack(ctx: FunctionalContext): Promise<void> {
+export async function functional(ctx: FunctionalContext): Promise<void> {
   const poolId = await findPool(ctx);
   const myCoinId = await findAttackerAssetCoin(ctx);
 
@@ -160,4 +135,3 @@ export async function attack(ctx: FunctionalContext): Promise<void> {
   await ctx.client.core.waitForTransaction({ result: res });
 }
 
-export const functional = attack;

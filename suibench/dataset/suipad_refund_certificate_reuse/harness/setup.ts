@@ -13,25 +13,11 @@
 // legitimately account for; any TOKEN they end with beyond a single refunded
 // deposit must have come out of the shared reserve (see ./check.ts).
 import { Transaction } from "@mysten/sui/transactions";
-import type { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
 import type { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 
 interface SetupContext {
-  client: SuiJsonRpcClient & {
-    getOwnedObjects(input: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
-    core: {
-      signAndExecuteTransaction: (input: {
-        transaction: Transaction;
-        signer: unknown;
-        include?: unknown;
-      }) => Promise<{ $kind?: string; FailedTransaction?: unknown }>;
-      waitForTransaction: (input: { result: unknown }) => Promise<unknown>;
-    };
-  };
+  client: SuiGrpcClient;
   packageId: string;
   attacker: Ed25519Keypair;
   attackerAddress: string;
@@ -40,12 +26,11 @@ interface SetupContext {
 }
 
 async function findAdminToken(ctx: SetupContext): Promise<string> {
-  const owned = await ctx.client.getOwnedObjects({
+  const owned = await ctx.client.core.listOwnedObjects({
     owner: ctx.adminAddress,
-    filter: { StructType: `0x2::coin::Coin<${ctx.packageId}::token::TOKEN>` },
-    options: { showType: true },
+    type: `0x2::coin::Coin<${ctx.packageId}::token::TOKEN>`,
   });
-  const id = owned.data[0]?.data?.objectId;
+  const id = owned.objects[0]?.objectId;
   if (!id) throw new Error("setup: admin holds no TOKEN coin");
   return id;
 }

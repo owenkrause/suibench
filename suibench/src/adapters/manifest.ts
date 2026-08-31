@@ -6,9 +6,16 @@ import { transformVersion } from "../perturbation/version.js";
 
 const execFileAsync = promisify(execFile);
 
-export interface RunManifest {
+// One role image's provenance: its name and immutable ID (so two different grading
+// images can never produce indistinguishable reports).
+export interface ImageRef {
+  name: string;
+  id: string | null;
   sui_version: string | null;
-  image_id: string | null;
+}
+
+export interface RunManifest {
+  images: { untrusted: ImageRef; confirmer: ImageRef; gate: ImageRef };
   node_version: string;
   mysten_sui_version: string | null;
   git_commit: string | null;
@@ -60,13 +67,35 @@ function tryReadPackageJson(deps: ManifestDeps): string | null {
   }
 }
 
+async function imageRef(deps: ManifestDeps, name: string): Promise<ImageRef> {
+  // The recorded ID is the manifest's whole point (line 10). A missing image
+  // inspects to null, which would record empty provenance AND — since docker's
+  // default pull policy is `missing` — let a launch silently pull a stranger from
+  // a registry. Fail loud instead: grading runs pinned, already-built images (the
+  // launches also pass --pull=never so they refuse anything not present locally).
+  const id = await tryRun(deps, "docker", ["image", "inspect", "--format", "{{.Id}}", name]);
+  if (!id) {
+    throw new Error(
+      `image "${name}" not found locally — build it before grading; its provenance cannot be recorded`,
+    );
+  }
+  return {
+    name,
+    id,
+    sui_version: await tryRun(deps, "docker", ["run", "--rm", "--entrypoint", "sui", name, "--version"]),
+  };
+}
+
 export async function captureManifest(
-  image: string,
+  images: { untrusted: string; confirmer: string; gate: string },
   deps: ManifestDeps = defaultDeps,
 ): Promise<RunManifest> {
   return {
-    sui_version: await tryRun(deps, "docker", ["run", "--rm", "--entrypoint", "sui", image, "--version"]),
-    image_id: await tryRun(deps, "docker", ["image", "inspect", "--format", "{{.Id}}", image]),
+    images: {
+      untrusted: await imageRef(deps, images.untrusted),
+      confirmer: await imageRef(deps, images.confirmer),
+      gate: await imageRef(deps, images.gate),
+    },
     node_version: process.versions.node,
     mysten_sui_version: mystenSuiVersion(tryReadPackageJson(deps)),
     git_commit: await tryRun(deps, "git", ["rev-parse", "HEAD"]),

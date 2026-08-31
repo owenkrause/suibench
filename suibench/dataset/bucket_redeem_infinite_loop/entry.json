@@ -1,11 +1,12 @@
 {
+  "id": "chal_ec0afcb3",
   "version": 1,
   "vulns": [
     {
       "id": "redeem-infinite-loop",
       "module": "bucket",
       "title": "handle_redeem re-pushes a fully-redeemed zero-debt bottle without decrementing the remaining amount, never terminating the loop",
-      "severity": "high",
+      "severity": "low",
       "root_cause": "handle_redeem loops while `buck_input_amount > 0 && table_length > 0`, popping the lowest-collateral-ratio bottle each iteration and redeeming against it. When `buck_input_amount >= bottle_buck_amount`, the whole bottle is redeemed (its debt becomes 0), the now-zero-debt bottle is `push_back`ed onto the table, and `buck_input_amount` is decremented by `bottle_buck_amount`. There is no check for `bottle_buck_amount == 0`, so once a debt-0 bottle exists it is selected again on the next iteration: the `buck_input_amount >= bottle_buck_amount` (>= 0) branch runs, redeems 0 collateral, re-pushes the same bottle, and decrements `buck_input_amount` by 0 — leaving both loop-condition operands unchanged. The `while` therefore never terminates, so a redeem for more BUCK than a single bottle's debt (e.g. one bottle in the table) spins until the transaction exhausts gas / hits the runtime loop bound: a gas-exhaustion denial-of-service on the redeem path. Separately, the loop mutates the `buck_input_amount` parameter itself down toward 0, so the post-loop `bucket.minted_buck_amount = bucket.minted_buck_amount - buck_input_amount` subtracts the residual (0 on the success path) rather than the amount actually redeemed, corrupting the protocol's outstanding-supply accounting. Fix: break out of the loop when the selected bottle's debt is 0, and track the remaining redemption amount in a separate variable so `buck_input_amount` stays intact for the final `minted_buck_amount` decrement.",
       "harm": "availability",
       "exploit": true,

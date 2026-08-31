@@ -15,23 +15,13 @@
 // shape — the runner only ever calls `attack`. Signs with the ADMIN keypair.
 import { Transaction } from "@mysten/sui/transactions";
 
+interface CreatedObject {
+  readonly id: string;
+  readonly type: string;
+}
+
 interface FunctionalContext {
   client: {
-    queryTransactionBlocks(input: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: {
-        objectChanges?: {
-          type: string;
-          objectType?: string;
-          objectId?: string;
-        }[];
-      }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
     core: {
       signAndExecuteTransaction: (input: {
         transaction: Transaction;
@@ -41,6 +31,9 @@ interface FunctionalContext {
       waitForTransaction: (input: { result: unknown }) => Promise<unknown>;
     };
   };
+  chain: {
+    findCreatedObjects(sender: string): Promise<readonly CreatedObject[]>;
+  };
   packageId: string;
   admin: unknown;
   adminAddress: string;
@@ -49,30 +42,14 @@ interface FunctionalContext {
 
 async function findPool(ctx: FunctionalContext): Promise<string> {
   const poolType = `${ctx.packageId}::pool::Pool`;
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: ctx.adminAddress },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data) {
-      for (const change of tx.objectChanges ?? []) {
-        if (
-          change.type === "created" &&
-          change.objectType === poolType &&
-          change.objectId
-        ) {
-          return change.objectId;
-        }
-      }
-    }
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
+  const pool = (await ctx.chain.findCreatedObjects(ctx.adminAddress)).find(
+    (object) => object.type === poolType,
+  );
+  if (pool) return pool.id;
   throw new Error("functional: could not locate the shared Pool");
 }
 
-export async function attack(ctx: FunctionalContext): Promise<void> {
+export async function functional(ctx: FunctionalContext): Promise<void> {
   const poolId = await findPool(ctx);
 
   const tx = new Transaction();
@@ -93,5 +70,3 @@ export async function attack(ctx: FunctionalContext): Promise<void> {
   await ctx.client.core.waitForTransaction({ result: res });
 }
 
-/** Readable alias — the confirmer runner only ever calls `attack`. */
-export const functional = attack;

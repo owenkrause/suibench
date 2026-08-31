@@ -15,22 +15,22 @@ module challenge::strategy_vault {
         operator: address,
         funds: Balance<ASSET>,
         operation_in_progress: bool,
-        saved_reserves: u64,
+        principal: u64,
     }
 
     public struct HarvestOp {}
 
     public fun create_vault(operator: address, ctx: &mut TxContext) {
-        transfer::share_object(Vault { id: object::new(ctx), operator, funds: balance::zero(), operation_in_progress: false, saved_reserves: 0 });
+        transfer::share_object(Vault { id: object::new(ctx), operator, funds: balance::zero(), operation_in_progress: false, principal: 0 });
     }
 
     public fun deposit(vault: &mut Vault, coin: Coin<ASSET>) {
+        vault.principal = vault.principal + coin::value(&coin);
         balance::join(&mut vault.funds, coin::into_balance(coin));
     }
 
     public fun start_harvest(vault: &mut Vault, ctx: &TxContext): HarvestOp {
         assert!(ctx.sender() == vault.operator, ENotOperator);
-        vault.saved_reserves = balance::value(&vault.funds);
         vault.operation_in_progress = true;
         HarvestOp {}
     }
@@ -44,7 +44,7 @@ module challenge::strategy_vault {
     public fun finish_harvest(vault: &mut Vault, op: HarvestOp, _returned_amount: u64, ctx: &TxContext) {
         assert!(ctx.sender() == vault.operator, ENotOperator);
         assert!(vault.operation_in_progress, ENotInOperation);
-        let required = vault.saved_reserves * MIN_RETURN_BPS / BPS_DENOM;
+        let required = vault.principal * MIN_RETURN_BPS / BPS_DENOM;
         assert!(balance::value(&vault.funds) >= required, EInsufficientReturn);
         vault.operation_in_progress = false;
         let HarvestOp {} = op;

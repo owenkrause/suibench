@@ -14,44 +14,27 @@
 //   3. hand the ATTACKER 10 COINA (and 0 COINB).
 //
 // After setup the world is: a shared pool holding 100/100 seeded by the honest
-// LP, and the attacker holding 10 COINA + 0 COINB — a normal small user. The
-// attacker's honest fair deposit could only ever add a tiny liquidity share
-// (their 10 COINA), so a pro-rata withdrawal can never net them the seeded
-// reserves. Capturing >= 90 COINB requires the near-free-liquidity bug.
+// LP, and the attacker holding 10 COINA + 0 COINB — a normal small user. A fair
+// deposit can only mint liquidity backed by real token A (deposited_a > 0);
+// minting a large-liquidity position with deposited_a == 0 requires the
+// near-free-liquidity overflow bug.
 import { Transaction } from "@mysten/sui/transactions";
-import type { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
 import type { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 
 interface SetupContext {
-  client: SuiJsonRpcClient & {
-    getOwnedObjects(input: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
-    queryTransactionBlocks(input: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: {
-        objectChanges?: {
-          type: string;
-          objectType?: string;
-          objectId?: string;
-        }[];
-      }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
-    core: {
-      signAndExecuteTransaction: (input: {
-        transaction: Transaction;
-        signer: unknown;
-        include?: unknown;
-      }) => Promise<{ $kind?: string; FailedTransaction?: unknown }>;
-      waitForTransaction: (input: { result: unknown }) => Promise<unknown>;
-    };
+  client: SuiGrpcClient;
+  chain: {
+    findCreatedObjects(
+      sender: string,
+    ): Promise<
+      readonly {
+        id: string;
+        type: string;
+        digest: string;
+        checkpoint: bigint;
+      }[]
+    >;
   };
   packageId: string;
   admin: Ed25519Keypair;
@@ -72,12 +55,12 @@ async function findAdminCoin(
   ctx: SetupContext,
   coinType: string,
 ): Promise<string> {
-  const owned = await ctx.client.getOwnedObjects({
+  const { objects } = await ctx.client.core.listOwnedObjects({
     owner: ctx.adminAddress,
-    filter: { StructType: `0x2::coin::Coin<${coinType}>` },
-    options: { showType: true },
+    type: `0x2::coin::Coin<${coinType}>`,
+    include: { json: true },
   });
-  const id = owned.data[0]?.data?.objectId;
+  const id = objects[0]?.objectId;
   if (!id) throw new Error(`setup: admin holds no ${coinType}`);
   return id;
 }
@@ -86,26 +69,10 @@ async function findCreatedPool(
   ctx: SetupContext,
   poolPrefix: string,
 ): Promise<string> {
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: ctx.adminAddress },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data) {
-      for (const change of tx.objectChanges ?? []) {
-        if (
-          change.type === "created" &&
-          change.objectType?.startsWith(poolPrefix) &&
-          change.objectId
-        ) {
-          return change.objectId;
-        }
-      }
-    }
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
+  const pool = (await ctx.chain.findCreatedObjects(ctx.adminAddress)).find(
+    (object) => object.type.startsWith(poolPrefix),
+  );
+  if (pool) return pool.id;
   throw new Error(
     `setup: could not find a created object of type ${poolPrefix}`,
   );

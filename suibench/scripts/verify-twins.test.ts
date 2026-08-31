@@ -9,7 +9,7 @@ import { generateTwin } from "../src/perturbation/transform.js";
 
 const perfect = (): RunScore => ({
   labels: [], findings: [],
-  metrics: { tier: "confirmed", labels_total: 1, labels_hit: 1, findings_total: 1, true_positives: 1, false_positives: 0, recall: 1, precision: 1, severity_accuracy: 1, severity_correct: 1, severity_total: 1 },
+  metrics: { tier: "confirmed", labels_total: 1, labels_hit: 1, findings_total: 1, true_positives: 1, false_positives: 0, unattributed_findings: 0, recall: 1, precision: 1, attribution_rate: 1, severity_accuracy: 1, severity_correct: 1, severity_total: 1 },
 } as RunScore);
 
 describe("evaluateTwinGate", () => {

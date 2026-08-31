@@ -1,4 +1,5 @@
 {
+  "id": "chal_a6d72ff9",
   "version": 1,
   "vulns": [
     {
@@ -6,6 +7,7 @@
       "module": "access_control",
       "title": "grant_admin is generic over the role type instead of requiring an admin cap, so a low-privilege cap escalates to admin",
       "severity": "high",
+      "harm": "state",
       "root_cause": "Capabilities are typed by a phantom role marker: `RoleCap<AdminRole>` is the privileged cap (minted only to the deployer in init and required by the admin-only `withdraw`), and `RoleCap<UserRole>` is a low-privilege cap that anyone can obtain via the permissionless `request_user_cap`. `grant_admin<R>(_cap: &RoleCap<R>, ...)` is meant to let an existing admin enroll another admin, so it should take `&RoleCap<AdminRole>` — but it is generic over `R` and never constrains it, so ANY `RoleCap<R>` (including a `RoleCap<UserRole>` that the attacker just requested for free) satisfies the signature and the function returns a fresh `RoleCap<AdminRole>`. The phantom role type param is never enforced, so privilege is not actually checked: an attacker calls `request_user_cap` then `grant_admin(&user_cap)` to mint an admin cap and then drains the shared Treasury via `withdraw`. The fix is to bind the parameter to the required role (`_cap: &RoleCap<AdminRole>`) rather than an unconstrained generic.",
       "exploit": true,
       "patch": true

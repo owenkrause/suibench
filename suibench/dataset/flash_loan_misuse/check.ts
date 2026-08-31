@@ -22,16 +22,23 @@
 // gain-backed-by-loss clauses collapse to a single threshold on the attacker's
 // own net gain, anchored by the fixed-supply setup: ASSET's total supply is
 // frozen at init and the ONLY ASSET outside the attacker's R is the pool's
-// seeded L, so a >= L net gain is reachable ONLY by keeping the borrowed
-// liquidity (exactly the bug) — it cannot come from anywhere else. A legitimate
-// flash-loan round-trip (borrow L, return it to the pool, repay) leaves the
-// attacker net 0 (see ./functional.ts), so it clears none of this threshold.
-import { type Check, balanceGained } from "core";
+// seeded L, so any sizeable net gain is reachable ONLY by keeping the borrowed
+// liquidity (exactly the bug) — it cannot come from anywhere else. A correctly
+// patched `repay` captures the loan back into the pool, so the attacker's net
+// gain is 0; a legitimate flash-loan round-trip (borrow L, return it, repay)
+// likewise leaves the attacker net 0 (see ./functional.ts). The threshold is
+// half the seed (matching the sibling flashloan entries), giving margin for
+// gas/rounding and partial drains while sitting far above the patched ceiling
+// of 0 — any drain of the bulk of the pool clears it, no legitimate flow does.
+import { type Check, type CheckResult, balanceGained } from "core";
 
-/** The pool liquidity seeded by the admin at setup; a drain captures it all. */
-const SEED_LIQUIDITY = 1000n;
+const LABEL_ID = "repay-any-coin" as const;
 
-export const check: Check = (delta, params) => {
+/** Half the admin-seeded pool liquidity (L = 1000); ~50%-of-seed, per siblings. */
+const POOL_DRAIN_THRESHOLD = 500n;
+
+export const check: Check = (delta, params): CheckResult => {
   const assetType = `${params.packageId}::lending_pool::LENDING_POOL`;
-  return balanceGained(delta, params.attackerAddress, assetType) >= SEED_LIQUIDITY;
+  const witnessed = balanceGained(delta, params.attackerAddress, assetType) >= POOL_DRAIN_THRESHOLD;
+  return { witnesses: witnessed ? [LABEL_ID] : [] };
 };

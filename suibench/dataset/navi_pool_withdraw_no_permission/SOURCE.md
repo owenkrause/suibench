@@ -1,7 +1,7 @@
 # navi_pool_withdraw_no_permission — Source provenance
 
 Confirmed-tier entry (owns `harness/`): a fresh-localnet permissionless-withdraw
-exploit drives committed state that `harness/check.ts` grades deterministically.
+exploit drives committed state that `check.ts` grades deterministically.
 
 ## Vulnerability
 - **Origin:** MoveBit — "Navi Smart Contract Audit Report", finding **POOL-01 "Missing
@@ -43,18 +43,18 @@ exploit drives committed state that `harness/check.ts` grades deterministically.
   deployer and **froze the treasury cap** (supply permanently fixed). Setup splits 1000 TOKEN
   off the admin's coin and calls `pool::open`, creating the shared `Pool` (funds = 1000,
   operator = admin). The attacker holds ZERO TOKEN.
-- `harness/solution.mts` — the reference exploit: the ATTACKER locates the shared Pool and
+- `exploits/withdraw-no-permission.ts` — the reference exploit: the ATTACKER locates the shared Pool and
   calls the ungated `withdraw(pool, 1000)`, transferring the drained 1000 TOKEN to itself
   (Δ +1000). Signs with `ctx.attacker`.
-- `harness/check.ts` — mechanism-sound predicate: attacker's TOKEN gain ≥ 500. Sound because
+- `check.ts` — mechanism-sound predicate: attacker's TOKEN gain ≥ 500. Sound because
   the TOKEN cap is frozen (attacker cannot mint) and the attacker deposited nothing, so any
   TOKEN it holds was drained from the pool via the permissionless `withdraw` — not a loose
   ">0".
-- `harness/functional.mts` — benign legit flow: the ADMIN (the pool operator) locates the Pool
+- `functional.ts` — benign legit flow: the ADMIN (the pool operator) locates the Pool
   and calls `withdraw(pool, 1000)`, keeping the coin. This is the path a correct patch
   preserves; the attacker gains nothing, so on this flow check = false. Signs with `ctx.admin`.
   (Exports `attack`; `functional` aliases it.)
-- `harness/patches/withdraw-has-no-permission-check-letting-any-caller-drain-the-pool/pool.move`
+- `patches/withdraw-no-permission/pool.move`
   — minimal fix: adds `const ENotAuthorized: u64 = 0;` and, as the first line of `withdraw`,
   `assert!(tx_context::sender(ctx) == pool.operator, ENotAuthorized);`. This aborts the
   attacker's drain while leaving the operator's (functional) withdrawal working. Everything

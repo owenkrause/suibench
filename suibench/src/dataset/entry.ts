@@ -32,6 +32,8 @@ import type { ConfirmerHarness } from "../adapters/confirmer.js";
 /** A loaded, validated dataset entry. `check` is imported lazily (a Check is TS,
  *  loaded via `loadCheck()` only when grading a confirmed-tier entry). */
 export interface DatasetEntry {
+  /** Neutral, stable corpus id — the correlation key. */
+  id: string;
   /** Directory basename — the entry's target name. */
   target: string;
   dir: string;
@@ -138,6 +140,7 @@ export function loadEntry(entryDir: string): DatasetEntry {
   const tier = checkPath ? "confirmed" : "detect";
 
   return {
+    id: manifest.id,
     target,
     dir,
     manifest,

@@ -20,13 +20,16 @@
 // economically-impossible-without-the-bug threshold (a single legitimate
 // refund nets 0; a correct patch caps the attacker's take at their one
 // deposit).
-import { type Check, balanceGained } from "core";
+import { type Check, type CheckResult, balanceGained } from "core";
+
+const LABEL_ID = "refund-certificate-reuse" as const;
 
 /** Attacker must extract far more than one legitimate deposit from the reserve. */
 const REPLAY_DRAIN_THRESHOLD = 1000n;
 
-export const check: Check = (delta, params) => {
+export const check: Check = (delta, params): CheckResult => {
   const TOKEN = `${params.packageId}::token::TOKEN`;
   const gained = balanceGained(delta, params.attackerAddress, TOKEN);
-  return gained >= REPLAY_DRAIN_THRESHOLD;
+  const witnessed = gained >= REPLAY_DRAIN_THRESHOLD;
+  return { witnesses: witnessed ? [LABEL_ID] : [] };
 };

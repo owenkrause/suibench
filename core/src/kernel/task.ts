@@ -8,8 +8,8 @@ import type { RunScore, EntryScore, PassK } from "./scorecard.js";
 
 /**
  * A `Task` grades one entry once, given whatever input the caller pins (an
- * entry + a policy in the real driver — abstract here so the kernel needs no
- * `Policy` port). Stays a producer of a `RunScore`; the combinators below never
+ * entry + an agent run in the real driver — abstract here so the kernel stays
+ * pure). Stays a producer of a `RunScore`; the combinators below never
  * inspect A.
  */
 export type Task<A> = (input: A) => Promise<RunScore>;

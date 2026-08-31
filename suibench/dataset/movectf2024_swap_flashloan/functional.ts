@@ -13,29 +13,21 @@
 // shape — the runner only ever calls `attack`.
 import { Transaction } from "@mysten/sui/transactions";
 
+interface CreatedObject {
+  readonly id: string;
+  readonly type: string;
+}
+
 interface FunctionalContext {
   client: {
-    getOwnedObjects(input: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
-    queryTransactionBlocks(input: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: {
-        objectChanges?: {
-          type: string;
-          objectType?: string;
-          objectId?: string;
-        }[];
-      }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
     core: {
+      listOwnedObjects(input: {
+        owner: string;
+        type?: string;
+        include?: { json?: boolean };
+      }): Promise<{
+        objects: { objectId: string; type: string; json?: unknown }[];
+      }>;
       signAndExecuteTransaction: (input: {
         transaction: Transaction;
         signer: unknown;
@@ -44,6 +36,9 @@ interface FunctionalContext {
       waitForTransaction: (input: { result: unknown }) => Promise<unknown>;
     };
   };
+  chain: {
+    findCreatedObjects(sender: string): Promise<readonly CreatedObject[]>;
+  };
   packageId: string;
   attacker: unknown;
   attackerAddress: string;
@@ -51,41 +46,25 @@ interface FunctionalContext {
 
 async function findVault(ctx: FunctionalContext): Promise<string> {
   const vaultPrefix = `${ctx.packageId}::vault::Vault<`;
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: ctx.attackerAddress },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data) {
-      for (const change of tx.objectChanges ?? []) {
-        if (
-          change.type === "created" &&
-          change.objectType?.startsWith(vaultPrefix) &&
-          change.objectId
-        ) {
-          return change.objectId;
-        }
-      }
-    }
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
+  const vault = (await ctx.chain.findCreatedObjects(ctx.attackerAddress)).find(
+    (object) => object.type.startsWith(vaultPrefix),
+  );
+  if (vault) return vault.id;
   throw new Error("functional: could not locate the shared Vault");
 }
 
 async function findAttackerCoinA(ctx: FunctionalContext): Promise<string> {
-  const owned = await ctx.client.getOwnedObjects({
+  const { objects } = await ctx.client.core.listOwnedObjects({
     owner: ctx.attackerAddress,
-    filter: { StructType: `0x2::coin::Coin<${ctx.packageId}::coina::COINA>` },
-    options: { showType: true },
+    type: `0x2::coin::Coin<${ctx.packageId}::coina::COINA>`,
+    include: { json: true },
   });
-  const id = owned.data[0]?.data?.objectId;
+  const id = objects[0]?.objectId;
   if (!id) throw new Error("functional: attacker holds no COINA coin");
   return id;
 }
 
-export async function attack(ctx: FunctionalContext): Promise<void> {
+export async function functional(ctx: FunctionalContext): Promise<void> {
   const TA = `${ctx.packageId}::coina::COINA`;
   const TB = `${ctx.packageId}::coinb::COINB`;
   const vaultId = await findVault(ctx);
@@ -110,5 +89,3 @@ export async function attack(ctx: FunctionalContext): Promise<void> {
   await ctx.client.core.waitForTransaction({ result: res });
 }
 
-/** Readable alias — the confirmer runner only ever calls `attack`. */
-export const functional = attack;

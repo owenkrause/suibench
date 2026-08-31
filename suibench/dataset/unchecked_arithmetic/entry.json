@@ -1,14 +1,16 @@
 {
+  "id": "chal_7f218832",
   "version": 1,
   "vulns": [
     {
       "id": "share-truncation",
       "module": "reward_pool",
       "title": "deposit truncates shares to zero on an inflated pool enabling a first-depositor donation attack",
-      "severity": "critical",
+      "severity": "high",
+      "harm": "state",
       "root_cause": "reward_pool::deposit mints shares as `(amount * pool.total_shares) / balance::value(&pool.balance)` using integer division, with no guard that the result is nonzero. An attacker who is the first depositor (and holds the PoolAdmin cap) deposits a tiny amount to mint 1 share, then inflates pool.balance far above the share supply via add_rewards. A later victim's normal deposit D then truncates to 0 shares because D * total_shares < balance, gifting their deposit to the attacker's outstanding share. The fix asserts the minted shares are nonzero in deposit.",
-      "exploit": true,
-      "patch": true
+      "exploit": false,
+      "patch": false
     }
   ]
 }

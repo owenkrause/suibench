@@ -9,29 +9,16 @@
 //   2. splits 100 TOKEN off and transfers it to the ATTACKER — the attacker's
 //      stake to invest (exactly the position a normal user would hold).
 // After setup: a shared Vault holding 100,000 TOKEN, the attacker holding 100
-// TOKEN, and the admin holding the remaining ~899,900 TOKEN. This fixed supply
-// is what makes the check's "attacker drained the vault" predicate sound (see
-// ./check.ts).
+// TOKEN, and the admin holding the remaining ~899,900 TOKEN. The checker does
+// not infer exploitation from these aggregate balances: it requires a
+// successful attacker-authored `RefundClaimed` event whose paid amount exceeds
+// the deposited amount (see ./check.ts).
 import { Transaction } from "@mysten/sui/transactions";
-import type { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
 import type { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 
 interface SetupContext {
-  client: SuiJsonRpcClient & {
-    getOwnedObjects(input: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
-    core: {
-      signAndExecuteTransaction: (input: {
-        transaction: Transaction;
-        signer: unknown;
-        include?: unknown;
-      }) => Promise<{ $kind?: string; FailedTransaction?: unknown }>;
-      waitForTransaction: (input: { result: unknown }) => Promise<unknown>;
-    };
-  };
+  client: SuiGrpcClient;
   packageId: string;
   attacker: Ed25519Keypair;
   attackerAddress: string;
@@ -40,12 +27,11 @@ interface SetupContext {
 }
 
 async function findAdminTokenCoin(ctx: SetupContext): Promise<string> {
-  const owned = await ctx.client.getOwnedObjects({
+  const owned = await ctx.client.core.listOwnedObjects({
     owner: ctx.adminAddress,
-    filter: { StructType: `0x2::coin::Coin<${ctx.packageId}::token::TOKEN>` },
-    options: { showType: true },
+    type: `0x2::coin::Coin<${ctx.packageId}::token::TOKEN>`,
   });
-  const id = owned.data[0]?.data?.objectId;
+  const id = owned.objects[0]?.objectId;
   if (!id) throw new Error("setup: admin holds no TOKEN coin");
   return id;
 }

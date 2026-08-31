@@ -1,46 +1,62 @@
 # Source
 
 - **Target:** `secure_deepbook_rate_limiter` — a **NEGATIVE** (clean, non-vulnerable)
-  detect-tier corpus entry: a correct, stateful token-bucket rate limiter used to bound
-  withdrawal rates on a margin/lending pool. `groundtruth.json` has `vulns: []`.
-- **Origin:** MystenLabs/deepbookv3 (github.com/MystenLabs/deepbookv3), `packages/deepbook_margin`,
-  module `deepbook_margin::rate_limiter` (`rate_limiter.move`). Production code from a
-  heavily-audited protocol; the module's own doc-comment cites a token-bucket design reference.
-- **License:** per-file SPDX `Apache-2.0`; repo root `LICENSE` Apache-2.0 (Copyright (c) Mysten
-  Labs, Inc.). Clean, permissive.
-- **Pre-fix?** N/A — this is not a vulnerable revision. It is a correct module included as a
-  realistic negative.
+  detect-tier corpus entry. `entry.json` has `vulns: []`; any finding reported against it
+  scores as a false positive.
+- **Shape:** a correct, genuinely-reachable token-bucket rate limiter that gates withdrawals
+  from a shared pool holding a `Balance<challenge::asset::ASSET>`.
+- **Origin/inspiration:** token-bucket limiter design as used in MystenLabs/deepbookv3
+  (`packages/deepbook_margin`). Rewritten here into the corpus object shape rather than copied
+  verbatim.
 
-## Why this is a realistic negative (plausibly-flaggable but clean)
+## Why this rebuild (S8)
 
-An auditor or model is tempted to flag four things; all are correctly handled:
+The prior version of this entry was structurally separable from the positive entries and was
+dead code:
 
-1. The `elapsed` time subtraction (`current_time - self.last_updated_ms`) as a possible
-   underflow on clock skew — but it is guarded by `if (current_time > self.last_updated_ms)`
-   (else `0`), so no underflow.
-2. The refill accumulation `available + elapsed * refill_rate_per_ms` as an overflow — but every
-   term is widened to `u128` before the mul/add and then clamped with `min(.., capacity)`, so it
-   cannot overflow the `u64` result.
-3. `check_and_record_withdrawal` as a possible over-withdraw — but it returns `false` (and does
-   not mutate `available`) when `amount > available`, and only decrements on success.
-4. `update_config` changing capacity/rate mid-flight — but it calls `refill(clock)` FIRST to
-   settle accrual under the old rate, then clamps `available` down to the new `capacity`.
+- It declared no `key` struct, no `id: UID`, and no shared object, so three zero-analysis greps
+  (`key`, `id: UID`, `share_object`) sorted it away from every positive — a decontamination
+  signal readable straight off the sources.
+- Its `RateLimiter` was `has store` with only `public(package)` constructors and mutators, none
+  of which any transaction could reach: no `init`, no shared object, no public entry point ever
+  obtained a `RateLimiter` receiver. A "no exploit exists" verdict was a consequence of
+  unreachable code, not a measurement.
 
-The token-bucket algorithm is textbook and each arithmetic step is explicitly guarded
-(u128 widening + min-clamp + skew guard). Confidence it is genuinely clean: HIGH.
+This rebuild gives the entry the positives' object shape and makes the limiter genuinely
+reachable, while staying clean.
 
-## Decontamination
+## Shape (matches the positives)
 
-- Package renamed `deepbook_margin` -> `challenge`; module is now `challenge::rate_limiter`.
-- Dropped the SPDX / copyright header.
-- Removed the doc-comment "Reference: <chainlink RateLimiter.sol URL>" line (the only
-  DeepBook/Mysten/external identifier); replaced the doc comment with a neutral one-liner.
-- No "safe" / "audited" / "correct" comment that would tell a model the module is clean.
-- Body otherwise **verbatim**: all function bodies (including the `#[test_only]` accessors) are
-  byte-for-byte the upstream source; only the package address and the two comment lines changed.
+- `sources/asset.move`: OTW `ASSET` coin module (same shape as the positive entries).
+- `Pool has key { id: UID, funds: Balance<ASSET>, limiter: RateLimiter }`, created and
+  `transfer::share_object`'d in `init`.
+- `RateLimiter has store` embedded in `Pool`: `available`, `last_updated_ms`, `capacity`,
+  `refill_rate_per_ms`.
+- Unprivileged public entry points routing through the bucket:
+  - `deposit(pool, coin: Coin<ASSET>, clock)` → internal `record_deposit` then joins funds.
+  - `withdraw(pool, amount, clock, ctx): Coin<ASSET>` → asserts internal
+    `check_and_record_withdrawal`, then splits and releases funds.
+- View helpers `available(pool, clock)` and `balance(pool)`.
+
+## Why it is reachable and clean
+
+- **Reachable:** the `Pool` is shared in `init`, and `deposit`/`withdraw` are `public` and take
+  the shared `Pool` by `&mut`, so any sender can drive the limiter in a normal PTB.
+- **Refill capped, no overflow:** `refill` widens every term to `u128` before multiply/add and
+  clamps with `min(.., capacity)`, so `available` can never exceed `capacity` and the `u64`
+  result can never overflow. Clock skew is guarded (`if now > last_updated_ms else 0`), so no
+  underflow. `last_updated_ms` starts at `0`; the first refill's large `elapsed` is harmless
+  because the result is clamped to `capacity`.
+- **Withdrawal gated:** `check_and_record_withdrawal` refills, returns `false` without mutating
+  when `amount > available`, and only decrements on success; `withdraw` `assert!`s that result,
+  so funds are released only within the current bucket budget. No bypass, no off-by-one letting
+  the bucket exceed its cap.
+
+No "safe"/"audited"/"correct" or vuln/fix-naming comments in `sources/`.
 
 ## Compilation
 
-Depends only on `std::u128::min`, `std::u64::max_value!`, and `sui::clock::Clock`. Builds clean
-with `sui move build --build-env mainnet` against the Sui framework; no external protocol types or
-stubs required. Detect-tier: no `harness/`.
+Depends only on `std::u128::min`, `sui::balance`, `sui::coin`, `sui::clock::Clock`, and
+`challenge::asset`. Builds clean with `sui move build --build-env mainnet` against the Sui
+framework (pre-existing `coin::create_currency` deprecation warning only). Detect-tier: no
+`harness/`, `exploits/`, `patches/`, `check.ts`, or `functional.ts`.

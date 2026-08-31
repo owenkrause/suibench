@@ -40,22 +40,16 @@ describe("parseArgs", () => {
     expect(() => parseArgs(["--concurrency"])).toThrow(/requires a value/);
   });
 
-  it("rejects the invalid static + exploitation cell", () => {
-    expect(() =>
-      parseArgs(["--axis", "exploitation", "--harness", "static"]),
-    ).toThrow(/static \+ exploitation is invalid/);
+  it("accepts static + exploitation (raw baseline: blind exploit, confirmer-graded)", () => {
+    const args = parseArgs(["--axis", "exploitation", "--harness", "static"]);
+    expect(args.axis).toBe("exploitation");
+    expect(args.harness).toBe("static");
   });
 
   it("validates effort against the selected model", () => {
     expect(() =>
       parseArgs(["--model", "gpt-5", "--effort", "max"]),
     ).toThrow(/does not support/);
-  });
-
-  it("rejects conflicting offline policy inputs", () => {
-    expect(() =>
-      parseArgs(["--scripted", "a.json", "--replay", "runs/"]),
-    ).toThrow(/mutually exclusive/);
   });
 
   it("classifies lazy judge setup failure as a model operation error", async () => {

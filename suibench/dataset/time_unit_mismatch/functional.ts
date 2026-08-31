@@ -22,36 +22,26 @@
 // container plumbing runs it unchanged; `functional` is a readable alias.
 import { Transaction } from "@mysten/sui/transactions";
 import { SUI_CLOCK_OBJECT_ID, normalizeStructTag } from "@mysten/sui/utils";
+import type { Signer } from "@mysten/sui/cryptography";
+import type { SuiClientTypes } from "@mysten/sui/client";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
 
-interface TxResult {
-  $kind?: string;
-  Transaction?: {
-    effects?: { changedObjects?: { objectId: string; idOperation?: string }[] };
-    objectTypes?: Record<string, string>;
-  };
-  FailedTransaction?: unknown;
-}
+type TxResult = SuiClientTypes.TransactionResult<{
+  effects: true;
+  objectTypes: true;
+}>;
 
 interface FunctionalContext {
-  client: {
-    core: {
-      signAndExecuteTransaction: (input: {
-        transaction: Transaction;
-        signer: unknown;
-        include?: unknown;
-      }) => Promise<TxResult>;
-      waitForTransaction: (input: { result: unknown }) => Promise<unknown>;
-    };
-  };
+  client: SuiGrpcClient;
   packageId: string;
-  attacker: unknown;
+  attacker: Signer;
   attackerAddress: string;
 }
 
 const LOCK_AMOUNT_MIST = 1_000_000_000n; // ~1 SUI
 const LOCK_DURATION_SECS = 1n; // intended unlock ~1s out (= 1000ms once patched)
 
-export async function attack(ctx: FunctionalContext): Promise<void> {
+export async function functional(ctx: FunctionalContext): Promise<void> {
   // --- lock ~1 SUI for 1 second ---
   const lockTx = new Transaction();
   lockTx.setSender(ctx.attackerAddress);
@@ -116,7 +106,8 @@ function findCreatedVault(
     const got = types[change.objectId];
     if (
       change.idOperation === "Created" &&
-      got &&
+      typeof got === "string" &&
+      got.includes("::") &&
       normalizeStructTag(got) === want
     ) {
       return change.objectId;
@@ -125,5 +116,3 @@ function findCreatedVault(
   return undefined;
 }
 
-/** Readable alias — the confirmer runner only ever calls `attack`. */
-export const functional = attack;

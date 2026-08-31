@@ -2,7 +2,7 @@
 
 Confirmed-tier availability/DoS entry (has `harness/`): a permanent-brick DoS graded via
 the victim machinery (`CheckContext.victim` / `classifyVictimOutcome`). A designated victim
-traversal is submitted after the attack; `harness/check.ts` keys on the STANDARD
+traversal is submitted after the attack; `check.ts` keys on the STANDARD
 `ctx.victim?.status !== "success"`. The bug is an out-of-bounds ASSERT, so the vulnerable
 victim op MoveAborts (code 7, `EIndexOutOfRange`, in `is_left_child`) → non-success; the patch
 DELETES that assert so the SAME bricked state lets `table::borrow` find the live internal index
@@ -10,7 +10,7 @@ and the victim op SUCCEEDS. Thus `!== "success"` cleanly separates bug from patc
 sibling bucket loop-DoS, which must key on `gas_exhausted`).
 
 ## Grading gates (validated on live localnets — all three green)
-- **gold-check** — `harness/solution.mts` inserts keys `1,2,4,8,16,32` (a right-leaning
+- **gold-check** — `exploits/critbit-brick.ts` inserts keys `1,2,4,8,16,32` (a right-leaning
   internal-node spine: leaf index i, internal index i−1; root = internal 4 holds the key-32 leaf),
   then removes leaf index 0 (key 1) and leaf index 1 (key 2). Each `remove_leaf_by_index` deletes
   the removed leaf's parent internal node WITHOUT renumbering, so `table::length(internal_nodes)`
@@ -18,10 +18,10 @@ sibling bucket loop-DoS, which must key on `gas_exhausted`).
   (≥ length 3). The victim `next_leaf(32)` then hits `is_left_child(tree, 4, ..)` and trips the
   out-of-bounds assert → `abort` (code 7) → non-success → confirmed. (Observed on localnet:
   `MoveAbort ... abort code: 7, in '...::critbit::is_left_child'`.)
-- **Gate A (benign)** — `harness/functional.mts` runs the SAME inserts WITHOUT the trap removals
+- **Gate A (benign)** — `functional.ts` runs the SAME inserts WITHOUT the trap removals
   (a normal order book being populated); every live internal index < length, so `next_leaf(32)`
   completes → `success` → NOT confirmed.
-- **Gate B (patch)** — `harness/patches/<label-slug>/critbit.move` deletes ONLY the `is_left_child`
+- **Gate B (patch)** — `patches/critbit-brick/critbit.move` deletes ONLY the `is_left_child`
   length assert; on the solution's bricked state `table::borrow` finds the live index 4, so
   `next_leaf(32)` completes → `success` → NOT confirmed.
 
@@ -41,7 +41,7 @@ and on a patched copy) before translating it into the SDK harness.
 - **`friend challenge::critbit_test;` in `critbit.move`** — the ONLY change to the vulnerable file:
   the module already carried this friend declaration under `#[test_only]` (with a matching
   `_for_test` surface); it was promoted to a plain (non-`#[test_only]`) friend so the driver can
-  call the friend-gated entry points in the NON-test devnet publish. `is_left_child` and the entire
+  call the friend-gated entry points in the NON-test localnet publish. `is_left_child` and the entire
   rest of `critbit.move` — including the vulnerable assert — remain byte-verbatim (lines 380–382
   unchanged; the fix lives ONLY in the patch).
 

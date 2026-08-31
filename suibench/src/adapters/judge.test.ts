@@ -65,4 +65,26 @@ describe("makeJudge", () => {
       message: expect.stringMatching(/judge request failed/),
     });
   });
+
+  it("classifies a token-limited response as an errored model operation", async () => {
+    const judge = makeJudge({
+      async send() {
+        return {
+          content: [{ type: "text" as const, text: "0" }],
+          stopReason: "max_tokens" as const,
+          usage: {
+            inputTokens: 10,
+            outputTokens: 1024,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+          },
+        };
+      },
+    }, "judge-model");
+
+    await expect(judge(finding, labels)).rejects.toMatchObject({
+      name: "AgentError",
+      message: expect.stringMatching(/token limit/),
+    });
+  });
 });

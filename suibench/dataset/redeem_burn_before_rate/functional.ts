@@ -4,29 +4,22 @@
 // (they staked 1000 and pulled back 1), so this legitimate partial-redeem flow —
 // which a correct patch preserves — must NOT trip the attacker-gain check.
 import { Transaction } from "@mysten/sui/transactions";
+
+interface CreatedObject {
+  readonly id: string;
+  readonly type: string;
+}
+
 interface Ctx {
   client: {
-    getOwnedObjects(i: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
-    queryTransactionBlocks(i: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: {
-        objectChanges?: {
-          type: string;
-          objectType?: string;
-          objectId?: string;
-        }[];
-      }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
     core: {
+      listOwnedObjects(i: {
+        owner: string;
+        type?: string;
+        include?: { json?: boolean };
+      }): Promise<{
+        objects: { objectId: string; type: string; json?: unknown }[];
+      }>;
       signAndExecuteTransaction: (i: {
         transaction: Transaction;
         signer: unknown;
@@ -35,42 +28,32 @@ interface Ctx {
       waitForTransaction: (i: { result: unknown }) => Promise<unknown>;
     };
   };
+  chain: {
+    findCreatedObjects(sender: string): Promise<readonly CreatedObject[]>;
+  };
   packageId: string;
   attacker: unknown;
   attackerAddress: string;
   adminAddress: string;
 }
 async function findPool(ctx: Ctx): Promise<string> {
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: ctx.adminAddress },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data)
-      for (const c of tx.objectChanges ?? [])
-        if (
-          c.type === "created" &&
-          c.objectType === `${ctx.packageId}::liquid_staking::Pool` &&
-          c.objectId
-        )
-          return c.objectId;
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
+  const pool = (await ctx.chain.findCreatedObjects(ctx.adminAddress)).find(
+    (object) => object.type === `${ctx.packageId}::liquid_staking::Pool`,
+  );
+  if (pool) return pool.id;
   throw new Error("functional: Pool not found");
 }
 async function findCoin(ctx: Ctx): Promise<string> {
-  const owned = await ctx.client.getOwnedObjects({
+  const { objects } = await ctx.client.core.listOwnedObjects({
     owner: ctx.attackerAddress,
-    filter: { StructType: `0x2::coin::Coin<${ctx.packageId}::asset::ASSET>` },
-    options: { showType: true },
+    type: `0x2::coin::Coin<${ctx.packageId}::asset::ASSET>`,
+    include: { json: true },
   });
-  const id = owned.data[0]?.data?.objectId;
+  const id = objects[0]?.objectId;
   if (!id) throw new Error("functional: attacker holds no ASSET");
   return id;
 }
-export async function attack(ctx: Ctx): Promise<void> {
+export async function functional(ctx: Ctx): Promise<void> {
   const pool = await findPool(ctx);
   const coin = await findCoin(ctx);
   const tx = new Transaction();
@@ -93,4 +76,3 @@ export async function attack(ctx: Ctx): Promise<void> {
     throw new Error("functional: attacker stake/redeem failed");
   await ctx.client.core.waitForTransaction({ result: res });
 }
-export const functional = attack;

@@ -2,30 +2,16 @@
 // attacker with 100 ASSET; the attacker opens an account and deposits 100 (vault=1000,
 // attacker collateral=100). The 900 of admin collateral is what the exploit drains.
 import { Transaction } from "@mysten/sui/transactions";
-import type { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
 import type { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
+
+interface CreatedObject {
+  readonly id: string;
+  readonly type: string;
+}
+
 interface Ctx {
-  client: SuiJsonRpcClient & {
-    getOwnedObjects(i: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
-    queryTransactionBlocks(i: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: {
-        objectChanges?: {
-          type: string;
-          objectType?: string;
-          objectId?: string;
-        }[];
-      }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
+  client: SuiGrpcClient & {
     core: {
       signAndExecuteTransaction: (i: {
         transaction: Transaction;
@@ -35,6 +21,9 @@ interface Ctx {
       waitForTransaction: (i: { result: unknown }) => Promise<unknown>;
     };
   };
+  chain: {
+    findCreatedObjects(sender: string): Promise<readonly CreatedObject[]>;
+  };
   packageId: string;
   admin: Ed25519Keypair;
   attacker: Ed25519Keypair;
@@ -42,32 +31,19 @@ interface Ctx {
   attackerAddress: string;
 }
 async function findEx(ctx: Ctx): Promise<string> {
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: ctx.adminAddress },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data)
-      for (const c of tx.objectChanges ?? [])
-        if (
-          c.type === "created" &&
-          c.objectType === `${ctx.packageId}::perp::Exchange` &&
-          c.objectId
-        )
-          return c.objectId;
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
+  const exchange = (await ctx.chain.findCreatedObjects(ctx.adminAddress)).find(
+    (object) => object.type === `${ctx.packageId}::perp::Exchange`,
+  );
+  if (exchange) return exchange.id;
   throw new Error("setup: Exchange not found");
 }
 async function coinOf(ctx: Ctx, owner: string): Promise<string> {
-  const o = await ctx.client.getOwnedObjects({
+  const { objects } = await ctx.client.core.listOwnedObjects({
     owner,
-    filter: { StructType: `0x2::coin::Coin<${ctx.packageId}::asset::ASSET>` },
-    options: { showType: true },
+    type: `0x2::coin::Coin<${ctx.packageId}::asset::ASSET>`,
+    include: { json: true },
   });
-  const id = o.data[0]?.data?.objectId;
+  const id = objects[0]?.objectId;
   if (!id) throw new Error(`setup: ${owner} no ASSET`);
   return id;
 }

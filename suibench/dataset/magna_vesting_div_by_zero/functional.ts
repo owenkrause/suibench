@@ -56,7 +56,7 @@ function encodePiece(startTime: number): number[] {
   ];
 }
 
-export async function attack(ctx: FunctionalContext): Promise<void> {
+export async function functional(ctx: FunctionalContext): Promise<void> {
   const startTime = Math.max(0, Math.floor(Date.now() / 1000) - 100);
   const alloc = encodePiece(startTime);
   const tx = new Transaction();
@@ -78,5 +78,3 @@ export async function attack(ctx: FunctionalContext): Promise<void> {
   await ctx.client.core.waitForTransaction({ result: res });
 }
 
-/** Readable alias — the confirmer runner only ever calls `attack`. */
-export const functional = attack;

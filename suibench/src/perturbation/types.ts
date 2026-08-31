@@ -7,8 +7,8 @@
 // The gap-scoring types (`PerturbationResult`) are deferred to that branch; this
 // module owns only what the transformer + admissibility gate need.
 
-/** A single old→new identifier rename. `kind` is documentary (drives no logic
- *  beyond the OTW witness constraint, applied at manifest-build time). */
+/** A single old→new identifier rename. `kind` distinguishes module-position
+ *  renames from member-position renames and drives the OTW witness constraint. */
 export interface Rename {
   kind:
     | "package"
@@ -41,7 +41,7 @@ export interface RenameManifest {
   packages: string[];
   /** old module name → new module name. */
   moduleRenames: Record<string, string>;
-  /** All renames, flat. `from` values are guaranteed unique. */
+  /** All renames, flat. `from` values are unique within module/member namespaces. */
   all: Rename[];
   /** Package name rename (Move.toml `name` + `challenge::` alias), if any.
    *  The corpus uses a fixed `challenge` package alias; renaming it is optional

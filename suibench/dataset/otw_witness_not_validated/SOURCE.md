@@ -53,7 +53,7 @@ calls `sui::types::is_one_time_witness`, so any forged `drop` type mints the pri
   commented-out line is **removed entirely** (not left as a giveaway comment); the guard is simply
   absent, as it would be in a real missing-check bug.
 - `Move.toml` edition `2024`. Builds clean with `sui move build --build-env mainnet` (one lint
-  warning: unnecessary `entry` on a `public` fn — no errors). `build/` removed, `Move.lock` kept.
+  warning: unnecessary `entry` on a `public` fn — no errors). `build/` and the generated `Move.lock` removed.
 
 ## The bug (for graders)
 - **Location:** `sources/deep_pockets.move`, `create_protocol`, lines 63–77.

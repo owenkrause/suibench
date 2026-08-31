@@ -2,9 +2,12 @@
 // because only the grader boots the localnet and runs setup, so only it knows
 // the post-setup baseline.
 import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join, basename, resolve, extname } from "node:path";
-import { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
+import { createRequire } from "node:module";
+import { SuiGrpcClient } from "@mysten/sui/grpc";
 import type {
   Grader,
   GraderResult,
@@ -15,18 +18,32 @@ import type {
   BalanceSet,
   ObjectSet,
   ObjectState,
-  EventLog,
+  ObjectOwner,
+  CheckEvidence,
+  AttackTransactionEvidence,
+  MoveEventEvidence,
 } from "core";
+import { ownerAddress } from "core";
 import {
   InfraError,
-  materializeMount,
   waitForReady,
-  getMappedRpcUrl,
   readContextJson,
   copyIntoContainer,
   dockerExec,
+  dockerWait,
+} from "./docker.js";
+import {
+  materializeMount,
+  launchConfirmer,
+  launchGateContainer,
+  provisionPhase,
 } from "./sandbox.js";
 import type { SandboxManager } from "./sandbox.js";
+import { captureChainSnapshot } from "./snapshot.js";
+import { confirmVisible, type DrainResult } from "./gate.js";
+import { CONFIRMER_IMAGE } from "./images.js";
+
+const execFileAsync = promisify(execFile);
 
 export { InfraError };
 
@@ -42,12 +59,16 @@ export interface ConfirmerHarness {
 // `gas_exhausted` status to tell bug from patch.
 export function classifyVictimOutcome(result: unknown): VictimOutcome {
   const r = result as { $kind?: string; [k: string]: unknown };
-  const payload =
+  const payload: {
+    status?: { success?: boolean; error?: { message?: string } | null };
+  } | undefined =
     r && r.$kind
       ? (r[r.$kind] as {
           status?: { success?: boolean; error?: { message?: string } | null };
         })
-      : undefined;
+      : r && typeof r === "object"
+        ? (r as { status?: { success?: boolean; error?: { message?: string } | null } })
+        : undefined;
   const status = payload?.status;
   if (status?.success === true) return { status: "success", message: null };
   const message = status?.error?.message ?? null;
@@ -61,24 +82,62 @@ export function classifyVictimOutcome(result: unknown): VictimOutcome {
 // Under tsx, copy the TypeScript source and let the container's tsx execute it;
 // in a built install, use the sibling JavaScript. The integrity gate therefore
 // works from a fresh checkout without relying on an ignored local dist/ tree.
+// Bundling-safe fallback: when suibench is bundled into a host app (e.g. the web
+// server), import.meta.dirname points at the host's bundle dir, so the ../../dist
+// walk-up mis-resolves (doubling `dist`). Resolve suibench's real dist/adapters
+// via its own package export instead. Native suibench runs hit the sibling checks
+// first and never reach this.
+const bundledAdapter = (file: string): string =>
+  resolve(createRequire(import.meta.url).resolve("suibench/dataset"), "../../adapters", file);
+
 const RUNNER_SRC = (() => {
   const source = resolve(import.meta.dirname, "runner.ts");
   if (existsSync(source)) return source;
   const sibling = resolve(import.meta.dirname, "runner.js");
   if (existsSync(sibling)) return sibling;
-  return resolve(import.meta.dirname, "../../dist/adapters/runner.js");
+  return bundledAdapter("runner.js");
 })();
 const RUNNER_NAME = extname(RUNNER_SRC) === ".ts" ? "runner.ts" : "runner.mjs";
 
-const CONFIRMER_IMAGE = process.env.SUIBENCH_IMAGE ?? "suibench-auditor";
+const CHAIN_DISCOVERY_SRC = (() => {
+  const source = resolve(import.meta.dirname, "chain-discovery.ts");
+  if (existsSync(source)) return source;
+  const sibling = resolve(import.meta.dirname, "chain-discovery.js");
+  if (existsSync(sibling)) return sibling;
+  return bundledAdapter("chain-discovery.js");
+})();
+const CHAIN_DISCOVERY_NAME =
+  extname(CHAIN_DISCOVERY_SRC) === ".ts"
+    ? "chain-discovery.ts"
+    : "chain-discovery.js";
+
+// The gate's control-plane UDS path (matches gate-main.ts's default); the host
+// drives /drain over it via `docker exec <gate>`.
+const CONTROL_PATH = "/tmp/gate.sock";
+
+// Bound on the untrusted attack phase. A timeout is DIAGNOSTICS ONLY (dev #4) —
+// dockerWait reaps the container and returns `timedOut`, never throws.
+const PHASE_TIMEOUT_MS = (() => {
+  const n = Number(process.env.SUIBENCH_PHASE_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? n : 120_000;
+})();
+
+// Host-side visibility bounds for the drained digests (the ~170ms index lag,
+// spec §7.1): each digest gets `perDigest`, the whole batch `overall`.
+const VISIBILITY_PER_DIGEST_MS = 5_000;
+const VISIBILITY_OVERALL_MS = 30_000;
+
+// Bound on each host-side snapshot RPC call — a stalled localnet must not hang
+// the run's `finally` forever (every in-try host call needs a deadline).
+const SNAPSHOT_TIMEOUT_MS = 60_000;
+
+// Bound on the whole attack-evidence fetch batch — paired with a real
+// Promise.race so a client that ignores the shared AbortController can't hang
+// the run (see `collectCheckEvidence`).
+const EVIDENCE_TIMEOUT_MS = 30_000;
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-export function parsePhaseDigest(stdout: string): string | undefined {
-  const m = stdout.match(/^PHASE_DIGEST=(\S+)$/m);
-  return m ? m[1] : undefined;
 }
 
 // Victim-phase only: its serialized result IS the availability signal.
@@ -92,201 +151,342 @@ export function parsePhaseResult(stdout: string): unknown {
   }
 }
 
-/** Content identity of a (mount, script) capture — the base-boot cache key. */
-function cacheKey(mount: Mount, script: MoveFile): string {
-  const files = [...mount.files]
-    .sort((a, b) => a.path.localeCompare(b.path))
-    .map((f) => `${f.path}\0${f.contents}`)
-    .join("\0");
-  return `${script.path}\0${script.contents}\0\0${files}`;
-}
-
 interface BootContext {
-  client: SuiJsonRpcClient;
+  containerId: string;
   packageId: string;
   addresses: string[];
   attackerAddress: string;
   adminAddress: string;
   userAddress: string;
+  benchmarkStartCheckpoint: string;
 }
 
-// Comprehensive snapshot (balances + objects-with-fields + events) so a
-// snapshot-pure check needs no live client.
-async function captureSnapshotUnchecked(
-  ctx: BootContext,
-  eventDigest?: string,
-): Promise<ChainSnapshot> {
+// Reduce the raw chain data (balances-as-strings + objects-with-fields) into the
+// snapshot-pure DTO a `Check` reads — no live client. Shared by the two host-side
+// captures below; the reduction is byte-identical to the old in-container path.
+// Balances arrive as strings (JSON has no bigint); object fields arrive as
+// strings from the RPC.
+function reduceRawSnapshot(
+  balances: Record<string, Record<string, string>>,
+  objects: RawObject[],
+): ChainSnapshot {
   const byAddress: Record<string, Record<string, bigint>> = {};
+  for (const [addr, coins] of Object.entries(balances)) {
+    const perCoin: Record<string, bigint> = {};
+    for (const [coinType, amount] of Object.entries(coins)) {
+      perCoin[coinType] = BigInt(amount);
+    }
+    byAddress[addr] = perCoin;
+  }
+
   const ownerOf: Record<string, string | null> = {};
   const byId: Record<string, ObjectState> = {};
-
-  for (const addr of ctx.addresses) {
-    const coins = await ctx.client.getAllBalances({ owner: addr });
-    const perCoin: Record<string, bigint> = {};
-    for (const c of coins) perCoin[c.coinType] = BigInt(c.totalBalance);
-    byAddress[addr] = perCoin;
-
-    let cursor: string | null | undefined = null;
-    do {
-      const page = (await ctx.client.getOwnedObjects({
-        owner: addr,
-        cursor,
-        options: { showContent: true, showType: true, showOwner: true },
-      })) as {
-        data: Array<{ data?: RawObject }>;
-        hasNextPage: boolean;
-        nextCursor?: string | null;
-      };
-      for (const entry of page.data) {
-        const parsed = parseObject(entry.data);
-        if (parsed) {
-          byId[parsed.id] = parsed.state;
-          ownerOf[parsed.id] = parsed.state.owner;
-        }
-      }
-      cursor = page.hasNextPage ? page.nextCursor : undefined;
-    } while (cursor);
+  for (const data of objects) {
+    const parsed = parseSnapshotObject(data);
+    byId[parsed.id] = parsed.state;
+    ownerOf[parsed.id] = ownerAddress(parsed.state.owner);
   }
 
-  const events: EventLog["events"] = [];
-  if (eventDigest) {
-    try {
-      const tx = (await ctx.client.getTransactionBlock({
-        digest: eventDigest,
-        options: { showEvents: true },
-      })) as { events?: Array<RawEvent> };
-      for (const ev of tx.events ?? []) {
-        events.push({
-          type: ev.type,
-          sender: ev.sender ?? "",
-          data: ev.parsedJson ?? null,
-        });
-      }
-    } catch {
-      /* events are best-effort; a snapshot without them is still valid */
-    }
-  }
-
-  const balances: BalanceSet = { byAddress };
-  const objects: ObjectSet = { ownerOf, byId };
-  const eventLog: EventLog = { events };
-  return { balances, objects, events: eventLog };
+  const outBalances: BalanceSet = { byAddress };
+  const outObjects: ObjectSet = { ownerOf, byId };
+  return { balances: outBalances, objects: outObjects };
 }
 
-async function captureSnapshot(
-  ctx: BootContext,
-  eventDigest?: string,
+// Host-side snapshot gather over the confirmer's published loopback port — the
+// container has no egress and never runs the gatherer itself (Task 3). Any host/
+// RPC failure is infra: it means the grader couldn't measure, not that the
+// exploit didn't land.
+async function captureSnapshotHost(
+  publishedPort: number,
+  raw: Record<string, string>,
 ): Promise<ChainSnapshot> {
   try {
-    return await captureSnapshotUnchecked(ctx, eventDigest);
+    const client = new SuiGrpcClient({
+      baseUrl: `http://127.0.0.1:${publishedPort}`,
+      network: "localnet",
+    });
+    const addrs = [raw.attackerAddress, raw.adminAddress, raw.userAddress];
+    const checkpoint = BigInt(raw.benchmarkStartCheckpoint);
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new InfraError("snapshot RPC timed out after 60s")),
+        SNAPSHOT_TIMEOUT_MS,
+      );
+    });
+    let balances: Record<string, Record<string, string>>;
+    let objects: RawObject[];
+    try {
+      ({ balances, objects } = await Promise.race([
+        captureChainSnapshot(client, addrs, checkpoint),
+        deadline,
+      ]));
+    } finally {
+      clearTimeout(timer);
+    }
+    return reduceRawSnapshot(balances, objects);
   } catch (err) {
     if (err instanceof InfraError) throw err;
     throw new InfraError(`snapshot RPC failed: ${errMsg(err)}`);
   }
 }
 
-interface RawObject {
-  objectId?: string;
-  type?: string;
-  owner?: unknown;
-  content?: {
-    dataType?: string;
-    type?: string;
-    fields?: Record<string, unknown>;
-  };
-}
+// Host-side backstop on the drain exec: the gate's own /drain self-bounds to
+// ~30s (drainDeadlineMs) and normally responds first. This is comfortably
+// above that so a wedged/OOM'd gate or a stalled docker daemon can't hang
+// runOnMount forever and skip its `finally` cleanup.
+const DRAIN_EXEC_TIMEOUT_MS = 60_000;
 
-interface RawEvent {
-  type: string;
-  sender?: string;
-  parsedJson?: unknown;
-}
-
-/** Normalize an owner descriptor (v2 RPC) to an address, or null for shared/immutable. */
-function ownerAddress(owner: unknown): string | null {
-  if (owner && typeof owner === "object") {
-    const o = owner as Record<string, unknown>;
-    if (typeof o.AddressOwner === "string") return o.AddressOwner;
-    if (typeof o.ObjectOwner === "string") return o.ObjectOwner;
+// Drive the gate's /drain over its control-plane UDS via `docker exec`. The
+// boundary settles in-flight submits and reports the committed digests; a drain
+// failure is infra (the confirmer can't know the committed state).
+export async function drainGate(
+  gateId: string,
+  controlPath: string,
+): Promise<DrainResult> {
+  const script = `const http=require("http");const r=http.request({socketPath:${JSON.stringify(controlPath)},method:"POST",path:"/drain"},x=>{let b="";x.on("data",c=>b+=c);x.on("end",()=>process.stdout.write(b))});r.end()`;
+  try {
+    const { stdout } = await execFileAsync(
+      "docker",
+      ["exec", gateId, "node", "-e", script],
+      { timeout: DRAIN_EXEC_TIMEOUT_MS },
+    );
+    return JSON.parse(stdout) as DrainResult;
+  } catch (err) {
+    throw new InfraError(`gate drain failed: ${errMsg(err)}`);
   }
-  return null;
 }
 
-function parseObject(
-  data: RawObject | undefined,
-): { id: string; state: ObjectState } | null {
-  if (!data || !data.objectId) return null;
-  const content = data.content;
-  if (!content || content.dataType !== "moveObject") return null;
-  const type = content.type ?? data.type ?? "";
+// A trusted-shape view of the SDK's `getTransaction` response — the
+// @mysten/sui@2.22.0 `TransactionResult` discriminated union is Mysten-
+// maintained; we no longer re-validate its shape at runtime (design change:
+// trust the SDK). A genuinely off-shape response throws a raw TypeError here,
+// which is an acceptable, unwrapped failure — not an `InfraError`.
+interface TrustedEventEnvelope {
+  eventType: string;
+  json: unknown;
+}
+interface TrustedTransactionPayload {
+  events?: readonly TrustedEventEnvelope[];
+}
+type TrustedTransactionResponse =
+  | { $kind: "Transaction"; Transaction: TrustedTransactionPayload }
+  | { $kind: "FailedTransaction"; FailedTransaction: TrustedTransactionPayload };
+
+// Pure mapper: narrow on `$kind`, derive DTO status, map events to the
+// SDK-free `{type, json}` shape in RPC order.
+function extractTransactionPayload(
+  response: TrustedTransactionResponse,
+): { status: "success" | "failure"; events: readonly MoveEventEvidence[] } {
+  const payload =
+    response.$kind === "Transaction" ? response.Transaction : response.FailedTransaction;
+  const events: MoveEventEvidence[] = (payload.events ?? []).map((event) => ({
+    type: event.eventType,
+    json: event.json,
+  }));
+  return { status: response.$kind === "Transaction" ? "success" : "failure", events };
+}
+
+// Fetch the committed status + events of exactly the supplied digests, in the
+// SDK-free `CheckEvidence` shape a `Check` reads. `core` is the trusted
+// host-side client's `.core` namespace only — never a full live client into
+// the DTO. `Promise.all` over the input array preserves order AND duplicates
+// exactly; the shared `AbortController` is paired with a real `Promise.race`
+// deadline so a client that ignores abort cannot hang the run. An RPC
+// rejection or a deadline timeout becomes an `InfraError`; partial evidence
+// is never returned. A malformed SDK response (see `extractTransactionPayload`)
+// is not treated as infrastructure failure — we trust the SDK's types.
+export async function collectCheckEvidence(
+  core: Pick<SuiGrpcClient["core"], "getTransaction">,
+  digests: readonly string[],
+  timeoutMs: number = EVIDENCE_TIMEOUT_MS,
+): Promise<CheckEvidence> {
+  if (digests.length === 0) return { attackTransactions: [] };
+
+  const controller = new AbortController();
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new InfraError(`evidence collection timed out after ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+  });
+
+  const fetches: Promise<AttackTransactionEvidence[]> = Promise.all(
+    digests.map(async (digest): Promise<AttackTransactionEvidence> => {
+      let response: TrustedTransactionResponse;
+      try {
+        response = (await core.getTransaction({
+          digest,
+          include: { events: true },
+          signal: controller.signal,
+        })) as unknown as TrustedTransactionResponse;
+      } catch (err) {
+        throw new InfraError(`fetch transaction ${digest} failed: ${errMsg(err)}`);
+      }
+      const { status, events } = extractTransactionPayload(response);
+      return { digest, status, events };
+    }),
+  );
+  // Attach a handler to the un-raced promise now — if `deadline` wins the
+  // race below, `fetches` may still reject later with nothing else attached,
+  // which Node reports as an unhandled rejection.
+  fetches.catch(() => {});
+
+  try {
+    return { attackTransactions: await Promise.race([fetches, deadline]) };
+  } finally {
+    clearTimeout(timer);
+    controller.abort();
+  }
+}
+
+// Production wiring seam: the confirmer passes the opaque `DrainResult`
+// straight through, so it cannot substitute a chain scan or a trusted-phase
+// digest list at a second call site. Requires a complete drain, confirms
+// exactly `drain.digests` are visible, then fetches evidence for exactly that
+// same array — attack-only provenance, structurally.
+export async function finalizeAttackEvidence(
+  client: SuiGrpcClient,
+  drain: DrainResult,
+): Promise<CheckEvidence> {
+  if (drain.kind !== "complete") {
+    throw new InfraError(
+      `gate drain ${drain.kind}: commit status unknown (ambiguous=${drain.ambiguous}, rejected=${drain.rejected})`,
+    );
+  }
+  const vis = await confirmVisible(client, drain.digests, {
+    perDigestMs: VISIBILITY_PER_DIGEST_MS,
+    overallMs: VISIBILITY_OVERALL_MS,
+  });
+  if (vis.kind !== "complete") {
+    throw new InfraError(
+      `drained digests not visible after commit (confirmed ${vis.confirmed.length}/${drain.digests.length})`,
+    );
+  }
+  return collectCheckEvidence(client.core, drain.digests);
+}
+
+interface RawObject {
+  objectId: string;
+  type: string;
+  owner: unknown;
+  fields: Record<string, unknown>;
+}
+
+function parseOwner(owner: unknown): ObjectOwner {
+  if (!owner || typeof owner !== "object") {
+    throw new Error("snapshot object has no native owner");
+  }
+  const value = owner as Record<string, unknown>;
+  switch (value.$kind) {
+    case "AddressOwner":
+      return { AddressOwner: String(value.AddressOwner) };
+    case "ObjectOwner":
+      return { ObjectOwner: String(value.ObjectOwner) };
+    case "Shared": {
+      const shared = value.Shared as Record<string, unknown>;
+      return {
+        Shared: { initial_shared_version: String(shared.initialSharedVersion) },
+      };
+    }
+    case "Immutable":
+      return "Immutable";
+    case "ConsensusAddressOwner": {
+      const consensus = value.ConsensusAddressOwner as Record<string, unknown>;
+      return {
+        ConsensusAddressOwner: {
+          start_version: String(consensus.startVersion),
+          owner: String(consensus.owner),
+        },
+      };
+    }
+    default:
+      throw new Error(`unknown native object owner: ${String(value.$kind)}`);
+  }
+}
+
+export function parseSnapshotObject(
+  data: RawObject,
+): { id: string; state: ObjectState } {
+  if (!data.objectId || !data.type || !data.fields) {
+    throw new Error("invalid native snapshot object");
+  }
   return {
     id: data.objectId,
     state: {
-      owner: ownerAddress(data.owner),
-      type,
-      fields: content.fields ?? {},
+      owner: parseOwner(data.owner),
+      type: data.type,
+      fields: data.fields,
     },
   };
 }
 
 interface Phase {
   script: MoveFile;
-  entryFn: "setup" | "attack" | "victim";
+  // Trusted phases only — run via `runPhase` (docker exec) in the confirmer
+  // container. The untrusted `attack` never uses this path; it runs isolated in
+  // its own phase container via `runAttackPhase` (see above).
+  entryFn: "setup" | "victim" | "functional";
 }
 
 export class Confirmer implements Grader {
-  // Opt-in content-keyed cache: the counterfactual re-runs the same base
-  // (mount, script) twice, so this boots it once. Patched mounts never hit it.
-  private readonly cache = new Map<string, Promise<GraderResult>>();
-
   constructor(
     private readonly manager: SandboxManager,
     private readonly harness: ConfirmerHarness = {},
-    private readonly image = CONFIRMER_IMAGE,
-    private readonly reuseBaseBoot = false,
   ) {}
 
   async runOnMount(mount: Mount, script: MoveFile): Promise<GraderResult> {
-    if (!this.reuseBaseBoot) return this.captureFresh(mount, script);
-    const key = cacheKey(mount, script);
-    let hit = this.cache.get(key);
-    if (!hit) {
-      hit = this.captureFresh(mount, script);
-      this.cache.set(key, hit);
+    const mountDir = materializeMount(mount);
+    try {
+      return await this.captureOnMountDir(mountDir, script);
+    } finally {
+      try {
+        rmSync(mountDir, { recursive: true, force: true });
+      } catch {
+        /* best-effort */
+      }
     }
-    return hit;
   }
 
-  // Boot a container on `mountDir`, publish (build) the mount, and assemble the
-  // BootContext + the in-container runner. Boot/publish failures are infra.
+  // Single-container boot on `mountDir`: publish (build) the mount and copy in
+  // the trusted runner. ONLY `runFunctional` (patch-mode) uses this path — the
+  // exploitation grader (`captureOnMountDir`) uses the two-network isolated flow.
+  // Boot/publish failures are infra.
   private async boot(
     mountDir: string,
   ): Promise<{ containerId: string; ctx: BootContext }> {
     let containerId: string | undefined;
     try {
       containerId = await this.manager.startTrackedContainer({
-        image: this.image,
-        env: { TARGET_CONTRACT: "target", NETWORK: "devnet" },
+        image: CONFIRMER_IMAGE,
+        env: { TARGET_CONTRACT: "target", NETWORK: "localnet" },
         mountDir,
-        publishRpc: true,
+        // The container boots `--network none` (no egress); the host drives the
+        // localnet only via `docker exec` (the runner), so untrusted code can
+        // neither exfiltrate the groundtruth patch/state nor reach off-box.
       });
       await waitForReady(containerId);
-      const rpcUrl = await getMappedRpcUrl(containerId);
-      const client = new SuiJsonRpcClient({ url: rpcUrl, network: "localnet" });
       const raw = await readContextJson(containerId);
       await copyIntoContainer(
         containerId,
         RUNNER_SRC,
         `/workspace/suibench/${RUNNER_NAME}`,
       );
+      await copyIntoContainer(
+        containerId,
+        CHAIN_DISCOVERY_SRC,
+        `/workspace/suibench/${CHAIN_DISCOVERY_NAME}`,
+      );
       return {
         containerId,
         ctx: {
-          client,
+          containerId,
           packageId: raw.packageId,
           attackerAddress: raw.attackerAddress,
           adminAddress: raw.adminAddress,
           userAddress: raw.userAddress,
+          benchmarkStartCheckpoint: raw.benchmarkStartCheckpoint,
           addresses: [raw.attackerAddress, raw.adminAddress, raw.userAddress],
         },
       };
@@ -309,14 +509,14 @@ export class Confirmer implements Grader {
       const booted = await this.boot(mountDir);
       containerId = booted.containerId;
       if (this.harness.setup) {
-        await this.runPhase(booted.ctx, containerId, {
+        await this.runPhase(containerId, {
           script: this.harness.setup,
           entryFn: "setup",
         });
       }
-      await this.runPhase(booted.ctx, containerId, {
+      await this.runPhase(containerId, {
         script: functional,
-        entryFn: "attack",
+        entryFn: "functional",
       });
       return { passed: true };
     } catch (err) {
@@ -332,63 +532,100 @@ export class Confirmer implements Grader {
     }
   }
 
-  private async captureFresh(
-    mount: Mount,
-    script: MoveFile,
-  ): Promise<GraderResult> {
-    const mountDir = materializeMount(mount);
-    try {
-      return await this.captureOnMountDir(mountDir, script);
-    } finally {
-      try {
-        rmSync(mountDir, { recursive: true, force: true });
-      } catch {
-        /* best-effort */
-      }
-    }
-  }
-
+  // The exploitation grader — the isolated two-network flow (spec §6.2). The
+  // untrusted attack runs in its OWN phase container on an internal attack-net,
+  // reaching the localnet ONLY through the gate; the trusted confirmer (localnet,
+  // target, setup, victim, snapshot) stays on chain-net and is never attached to
+  // attack-net. `verify-topology.ts` is the proven template for this sequence.
   private async captureOnMountDir(
     mountDir: string,
     script: MoveFile,
   ): Promise<GraderResult> {
-    const { containerId, ctx } = await this.boot(mountDir);
+    // Per-run-unique names — the grader shares ONE manager across concurrent
+    // runs, so `process.pid` would collide. `nextRunToken()` is monotonic.
+    const token = this.manager.nextRunToken();
+    const chainNet = `c-chain-${token}`;
+    const attackNet = `c-attack-${token}`;
+
+    let confirmerId: string | undefined;
+    let gateId: string | undefined;
+    let phaseId: string | undefined;
     try {
-      // --- phase 1: setup → capture PRE (post-setup baseline) ---
+      // --- 1: two networks (attack-net internal — no route off it except the gate) ---
+      await this.manager.createTrackedNetwork(chainNet);
+      await this.manager.createTrackedNetwork(attackNet, { internal: true });
+
+      // --- 2: confirmer on chain-net (publishes its localnet RPC to host loopback) ---
+      const confirmer = await launchConfirmer(this.manager, {
+        network: chainNet,
+        targetDir: mountDir,
+      });
+      confirmerId = confirmer.id;
+      const { publishedPort, chainIp, context: raw } = confirmer;
+
+      // The trusted setup/victim run IN the confirmer container via `runPhase`
+      // (docker exec) — copy the runner in for them. The UNTRUSTED attack never
+      // runs here; it goes to the isolated phase container (step 5).
+      await copyIntoContainer(confirmerId, RUNNER_SRC, `/workspace/suibench/${RUNNER_NAME}`);
+      await copyIntoContainer(confirmerId, CHAIN_DISCOVERY_SRC, `/workspace/suibench/${CHAIN_DISCOVERY_NAME}`);
+
+      // --- 3: gate on attack-net + chain-net, upstream = the confirmer's chain IP ---
+      const gate = await launchGateContainer(this.manager, {
+        network: { attack: attackNet, chain: chainNet },
+        upstreamHost: chainIp,
+        controlPath: CONTROL_PATH,
+      });
+      gateId = gate.id;
+
+      // --- 4: trusted setup → PRE (post-setup baseline), host-side ---
       if (this.harness.setup) {
-        await this.runPhase(ctx, containerId!, {
+        await this.runPhase(confirmerId, {
           script: this.harness.setup,
           entryFn: "setup",
         });
       }
-      const pre = await captureSnapshot(ctx);
+      const pre = await captureSnapshotHost(publishedPort, raw);
 
-      // --- phase 2: attack (the varied exploit) → capture POST ---
-      // An attack that does not land is a NORMAL counterfactual outcome (the
-      // "fails under patch" half): the grader still returns evidence — the
-      // (unchanged) committed state — and the `Check` reads it as false. Legacy's
-      // rule, site-based not string-based: a failure DURING the attack run is the
-      // exploit's problem (a non-confirmation), so we swallow it and snapshot;
-      // only the confirmer's own `infra:`-tagged failures (boot/publish/host
-      // wait) mean "couldn't grade" and propagate.
-      let post: ChainSnapshot;
-      try {
-        const attackOut = await this.runPhase(ctx, containerId!, {
-          script,
-          entryFn: "attack",
-        });
-        post = await captureSnapshot(ctx, parsePhaseDigest(attackOut));
-      } catch (err) {
-        if (err instanceof InfraError) throw err;
-        post = await captureSnapshot(ctx);
-      }
+      // --- 5–6: the untrusted attack in its isolated phase container, bounded ---
+      // An attack error / non-zero exit / timeout is DIAGNOSTICS ONLY (dev #4):
+      // it never throws and never short-circuits — drain, host-confirm, POST, and
+      // victim STILL run. A non-landing attack is the NORMAL "fails under patch"
+      // counterfactual; the Check reads the unchanged committed state as false.
+      phaseId = await this.runAttackPhase({
+        attackNet,
+        gateUrl: gate.url,
+        context: raw,
+        targetDir: mountDir,
+        script,
+        onProvisioned: (id) => {
+          phaseId = id;
+        },
+      });
 
-      // --- phase 3: victim (availability signal) → fold into POST ---
+      // --- 7: drain the gate, remove it BEFORE any host read of the localnet
+      // (reaps lingering attack reads, spec §6.2 step 7), then host-confirm the
+      // drained digests are locally visible and fetch their committed evidence
+      // (`finalizeAttackEvidence` — exactly the drained digests, never a chain
+      // scan) before POST. Only host infra (ambiguous/timeout drain, unindexed
+      // digest, malformed transaction response) propagates. ---
+      const drain = await drainGate(gateId, CONTROL_PATH);
+      await this.manager.remove(gateId);
+      gateId = undefined;
+      const client = new SuiGrpcClient({
+        baseUrl: `http://127.0.0.1:${publishedPort}`,
+        network: "localnet",
+      });
+      const evidence = await finalizeAttackEvidence(client, drain);
+
+      // --- 8: POST (committed state after the attack), host-side ---
+      let post = await captureSnapshotHost(publishedPort, raw);
+
+      // --- 9: trusted victim (availability signal) → fold into POST ---
       // Runs whether or not the attack landed: after a non-landing attack the
       // legit op SUCCEEDS (→ check false); after a DoS it aborts/exhausts gas
       // (→ check true). So availability grades correctly on both sides.
       if (this.harness.victim) {
-        const victimOut = await this.runPhase(ctx, containerId!, {
+        const victimOut = await this.runPhase(confirmerId, {
           script: this.harness.victim,
           entryFn: "victim",
         });
@@ -403,21 +640,69 @@ export class Confirmer implements Grader {
       return {
         delta: { pre, post },
         params: {
-          packageId: ctx.packageId,
-          attackerAddress: ctx.attackerAddress,
-          adminAddress: ctx.adminAddress,
-          userAddress: ctx.userAddress,
+          packageId: raw.packageId,
+          attackerAddress: raw.attackerAddress,
+          adminAddress: raw.adminAddress,
+          userAddress: raw.userAddress,
         },
+        evidence,
       };
     } finally {
-      await this.teardown(containerId);
+      // --- per-run cleanup: THIS run's resources only, containers before
+      // networks (docker refuses `network rm` while a container is attached).
+      // NEVER teardownAll() — the manager is shared across concurrent runs and
+      // that would brick them. `remove` is idempotent (gate already gone). ---
+      if (phaseId) await this.manager.remove(phaseId).catch(() => {});
+      if (gateId) await this.manager.remove(gateId).catch(() => {});
+      if (confirmerId) await this.manager.remove(confirmerId).catch(() => {});
+      await this.manager.remove(chainNet).catch(() => {});
+      await this.manager.remove(attackNet).catch(() => {});
     }
   }
 
-  // Waits for the host's mapped-RPC view to include the phase's final tx (the
-  // coin/object index can lag execution) so the next snapshot is consistent.
+  // The UNTRUSTED attack: provision an isolated phase container on attack-net
+  // (reaches the localnet only through the gate), wait bounded, and return its
+  // id. `provisionPhase` scopes the raw context (drops admin/user keypairs)
+  // internally — pass it RAW. A non-zero exit / timeout is DIAGNOSTICS ONLY and
+  // never throws (dev #4); only provisioning (docker) failures propagate as
+  // infra. The phase's own PHASE_OK/exit is read for diagnostics but never grades.
+  private async runAttackPhase(opts: {
+    attackNet: string;
+    gateUrl: string;
+    context: Record<string, string>;
+    targetDir: string;
+    script: MoveFile;
+    onProvisioned?: (id: string) => void;
+  }): Promise<string> {
+    const name = basename(opts.script.path) || "attack.mts";
+    const { id } = await provisionPhase(this.manager, {
+      network: opts.attackNet,
+      gateUrl: opts.gateUrl,
+      context: opts.context,
+      targetDir: opts.targetDir,
+      runnerBundle: { runner: RUNNER_SRC, chainDiscovery: CHAIN_DISCOVERY_SRC },
+      attackScript: { name, contents: opts.script.contents },
+    });
+    opts.onProvisioned?.(id);
+    const { exitCode, timedOut } = await dockerWait(id, { timeoutMs: PHASE_TIMEOUT_MS });
+    if (process.env.SUIBENCH_DEBUG) {
+      const logs = timedOut
+        ? ""
+        : await execFileAsync("docker", ["logs", id])
+            .then((r) => `${r.stdout}${r.stderr}`)
+            .catch(() => "");
+      console.warn(
+        `[confirmer] attack phase ${id.slice(0, 12)}: exit=${exitCode} timedOut=${timedOut} phaseOk=${/PHASE_OK/.test(logs)}`,
+      );
+    }
+    return id;
+  }
+
+  // Runs one phase's script in-container via `docker exec` (the runner awaits its
+  // own final tx before returning, so committed state is visible to the next
+  // snapshot exec without a host-side wait). Used for the TRUSTED setup/victim in
+  // the confirmer container — never the attack (which runs isolated, see above).
   private async runPhase(
-    ctx: BootContext,
     containerId: string,
     phase: Phase,
   ): Promise<string> {
@@ -451,23 +736,13 @@ export class Confirmer implements Grader {
       );
     }
 
-    const digest = parsePhaseDigest(res.stdout);
-    if (digest) {
-      try {
-        await ctx.client.core.waitForTransaction({ digest });
-      } catch (err) {
-        throw new InfraError(
-          `host waitForTransaction(${digest}) failed: ${errMsg(err)}`,
-        );
-      }
-    }
     return res.stdout;
   }
 
   private async teardown(containerId: string | undefined): Promise<void> {
     if (!containerId) return;
     try {
-      await this.manager.removeTrackedContainer(containerId);
+      await this.manager.remove(containerId);
     } catch {
       /* retained by the manager for teardownAll's retry */
     }

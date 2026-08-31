@@ -24,6 +24,44 @@ from real liquidity; the last redeemer is stranded with cTokens backed only by t
   exchange-rate `backing` includes `total_debt`, a `record_default` that tracks but does not write off bad
   debt, and a `redeem` that pays the inflated rate first-come. (Public `solendprotocol/suilend` source could
   support a verbatim upgrade later.)
+- **Borrow gated (2026-08-06).** The first reconstruction left `borrow` permissionless, collateral-free,
+  and never-repayable — an *unlabeled* free drain of pool liquidity, strictly more reachable than the labeled
+  bad-debt bug and one the gold patch did not close (it scored a correct finding as a false positive). Added
+  a `BorrowCap` (minted to the deployer at init) that `borrow` now requires, matching a real lending market's
+  gating; the seed loan in `harness/setup.ts` originates with it. The labeled early-redeem-at-overstated-rate
+  drain is once again the only unprivileged profit path. The `check.ts` was also anchored on the mechanism
+  (the attacker's `CTokenReceipt` must lose a large cToken share AND the payout-per-cToken must exceed the
+  fair socialized rate), so a gain that never redeems cannot satisfy it.
+- **Second label added — `collateral-release-no-repay` (2026-08-06).** This is the corpus's first
+  discriminative-attribution entry (S4). A realistic second, independent lending bug was added: a
+  collateralized borrow side (`borrow_collateralized` / `repay` / `withdraw_collateral`) where
+  `withdraw_collateral` releases the locked collateral without requiring the loan be repaid — the classic
+  "collateral released without repayment" flaw. It shares the pool state with the bad-debt bug and is
+  separately patchable. Each label carries its own `patches/<id>/`. `functional.ts` exercises both benign
+  flows.
+- **Event witnesses replace the aggregate-gain check (2026-08-21).** `check.ts` no longer OR's a
+  cToken-burn/gain heuristic with an underwater-`DebtReceipt` snapshot read. `redeem` and
+  `withdraw_collateral` each emit a neutral Move event — `Redemption {actor, ctokens_burned, actual_payout,
+  fair_written_off_payout}` and `CollateralRelease {actor, debt_remaining, collateral_released}` — atomically
+  with their state changes, identically across the vulnerable source and both label patches. `redeem`
+  computes `fair_written_off_payout` from a `total_debt`/`defaulted` write-off calculation done fresh on
+  every call (BEFORE the redemption mutates pool state), so the base/B-patch pool (where `record_default`
+  still doesn't subtract from `total_debt`) reports a value below the actual payout, while the A patch
+  (which does subtract) reports a value the payout can't exceed. A is witnessed only when a successful
+  attack transaction's own `Redemption` event has the attacker as `actor`, `ctokens_burned > 0`, and
+  `actual_payout > fair_written_off_payout`; B is witnessed only when a `CollateralRelease` event has the
+  attacker as `actor`, `debt_remaining > 0`, and `collateral_released > 0`. Each label is decided entirely
+  from its own operation's event — one operation's profit can no longer manufacture the other label's
+  witness (the historical false-credit failure mode this replaces).
+- **`record_default` tripwire hardened (2026-08-21).** `record_default` was a public, uncapped,
+  unvalidated function taking only `(pool, amount)` — callable by anyone with any amount, independent of the
+  labeled bugs, so an unrelated `record_default(401)` overflow could abort an otherwise-successful attack
+  transaction and falsely credit or discredit a label. It now takes a dedicated `DefaultCap` (`_cap:
+  &DefaultCap`, minted to the deployer at `init`, separate from the loan-origination `BorrowCap`) as its
+  first argument and asserts `amount <= pool.total_debt` (`EDefaultExceedsDebt`) before recording. Applied
+  identically to the vulnerable source and both patches — only the intended fix (A patch also subtracting
+  the amount from `total_debt`) differs. `harness/setup.ts` discovers the admin-owned `DefaultCap` and
+  passes it before `pool` and `400` when seeding the fixture's default.
 
 ## Decontamination
 - Package/address `challenge`; module `lending_pool`. No vuln/audit/fix-naming comments in `sources/` (the

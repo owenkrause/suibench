@@ -3,7 +3,7 @@ module challenge::vault {
     use sui::balance::{Self, Balance};
     use sui::sui::SUI;
 
-    /// Admin capability — only the deployer should have this.
+    /// Administrative capability.
     public struct AdminCap has key, store {
         id: UID,
     }
@@ -32,7 +32,7 @@ module challenge::vault {
         balance::join(&mut vault.balance, coin::into_balance(coin));
     }
 
-    /// Only admin can withdraw. Requires a reference to AdminCap.
+    /// Withdraw SUI from the vault. Takes an AdminCap by reference.
     public fun withdraw(
         _admin: &AdminCap,
         vault: &mut Vault,

@@ -1,39 +1,45 @@
 {
+  "id": "chal_db5b249b",
   "version": 1,
   "vulns": [
     {
       "id": "stale-oracle-price",
       "module": "library",
       "title": "get_oracle_price accepts a stale Pyth price (no freshness / max-age check)",
-      "severity": "high",
+      "severity": "medium",
+      "harm": "state",
       "root_cause": "get_oracle_price reads the price via pyth::pyth::get_price_unsafe, which returns the last stored price with no publish-time / age validation. A consumer that trusts this value will trade against an arbitrarily outdated price. The freshness-checked read (get_price_no_older_than with a max-age bound) should be used instead."
     },
     {
       "id": "zero-oracle-price",
       "module": "library",
       "title": "get_oracle_price accepts a zero oracle price (only non-negative, not strictly positive)",
-      "severity": "high",
+      "severity": "medium",
+      "harm": "state",
       "root_cause": "get_oracle_price extracts the price magnitude with pyth::i64::get_magnitude_if_positive, which only asserts the value is non-negative and returns 0 for a zero price. A price of exactly 0 therefore passes, so downstream margin/liquidation math can divide by or trade against a zero price. The code should assert price > 0."
     },
     {
       "id": "sequencer-public-mutator",
       "module": "roles",
       "title": "validate_unique_tx is a public mutator of the shared Sequencer with no permission check",
-      "severity": "high",
+      "severity": "medium",
+      "harm": "state",
       "root_cause": "validate_unique_tx is declared public and takes no capability / operator argument, only &mut Sequencer (a shared object). Any caller can insert an arbitrary tx_hash into the replay-protection map. An attacker can pre-mark the hash of a victim's not-yet-submitted transaction so the legitimate transaction later aborts with transaction_replay(), and can bloat the table / bump the counter at will. It should be gated by a capability check or restricted to package/friend visibility."
     },
     {
       "id": "admin-transfer-single-step",
       "module": "roles",
       "title": "set_exchange_admin performs a single-step, non-recoverable admin ownership transfer",
-      "severity": "medium",
+      "severity": "low",
+      "harm": "state",
       "root_cause": "set_exchange_admin transfers the ExchangeAdminCap to newAdmin in a single step (transfer::transfer) with no two-step accept handshake. If newAdmin is a wrong or uncontrolled address, adminship of the exchange is irrecoverably lost. A two-step propose/accept transfer should be used for ownership handoff."
     },
     {
       "id": "qty-check-type-conflated",
       "module": "evaluator",
       "title": "verify_min_max_qty_checks does not branch on order type (limit vs market caps conflated)",
-      "severity": "medium",
+      "severity": "low",
+      "harm": "state",
       "root_cause": "verify_min_max_qty_checks asserts a quantity against both maxQtyLimit and maxQtyMarket regardless of the order's type, so the tighter of the two caps effectively governs every order. Limit and market orders have distinct intended quantity ceilings; the check should branch on order type and apply only the cap matching that type."
     }
   ]

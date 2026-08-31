@@ -1,4 +1,5 @@
 {
+  "id": "chal_6573455a",
   "version": 1,
   "vulns": [
     {
@@ -6,6 +7,7 @@
       "module": "amm_pool",
       "title": "remove_liquidity pays LPs against the full reserve, which includes the protocol fee, so an LP skims fees owed to the protocol",
       "severity": "high",
+      "harm": "state",
       "root_cause": "Accrued protocol fees are held INSIDE the pool's `reserve` balance and tracked separately in `protocol_fee` (they are owed to the protocol, not to liquidity providers). `add_liquidity` correctly mints LP shares against the LP-claimable backing `reserve - protocol_fee`, so the fees are excluded from what a deposit buys. But `remove_liquidity` pays `lp_amount * balance::value(&reserve) / total_lp` — using the FULL reserve, which still includes `protocol_fee`. That asymmetry means LP shares are bought against the fee-excluded reserve but redeemed against the fee-included reserve, so every LP redemption skims a proportional slice of the protocol fees. An attacker deposits liquidity, lets (or waits for) fees to accrue, and immediately removes it, walking away with more than they contributed — capturing fee revenue owed to the protocol (and diluting it for everyone else). The fix is to redeem against the same fee-excluded basis: `lp_amount * (balance::value(&reserve) - protocol_fee) / total_lp`.",
       "exploit": true,
       "patch": true

@@ -2,49 +2,31 @@
 //
 // The legitimate use of the pool is an honest LP round-trip: a small user adds
 // liquidity with NORMAL price bounds, depositing the correctly-computed
-// required token A, then later removes the position and gets back ~what they
-// put in. This exercises exactly that — the attacker adds liquidity = 20 with
-// bounds (lower = 2^64, upper = 2^65), which via `compute_deposit_a` requires
-// exactly 10 COINA (their whole stake) through the correct full-precision path,
-// then removes the position.
+// required token A, then later removes the position and reclaims its escrow.
+// This exercises exactly that — the user adds liquidity = 20 with bounds
+// (lower = 2^64, upper = 2^65), which via `compute_deposit_a` requires exactly
+// 10 COINA (their whole stake) through the correct full-precision path, then
+// removes the position and gets that 10 COINA back.
 //
-// Pool before: 100 COINA / 100 COINB, total_liquidity = 200. After the honest
-// deposit: 110 COINA / 100 COINB, total_liquidity = 220, attacker position
-// liquidity = 20. Removing pays out 20/220 of each reserve = 10 COINA + 9 COINB.
-// Net for the attacker: ~0 COINA (put in 10, got 10 back) and +9 COINB — a
-// normal LP fee-free round-trip, WELL under the +90 COINB capture threshold.
-//
-// A correct guard (the per-label patch) leaves this path working: the honest
-// numerator never enters the overflow window, so `required_a` is unchanged.
-// ./check.ts must score this benign flow as a NON-exploit (soundness Gate A);
-// if it tripped, the predicate would be too loose.
+// The honest numerator never enters the overflow window, so `required_a` is the
+// same on the vulnerable and patched builds and this flow never aborts. The
+// minted position records `deposited_a = 10` (its real escrow), so ./check.ts —
+// which fires only on `deposited_a == 0` — scores this benign flow as a
+// NON-exploit (soundness Gate A). If it tripped, the predicate would be loose.
 //
 // Exports `attack(ctx)` (aliased `functional`) with the confirmer's
 // AttackContext shape — the runner only ever calls `attack`.
 import { Transaction } from "@mysten/sui/transactions";
 
+interface CreatedObject {
+  readonly id: string;
+  readonly type: string;
+  readonly digest: string;
+  readonly checkpoint: bigint;
+}
+
 interface FunctionalContext {
   client: {
-    getOwnedObjects(input: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
-    queryTransactionBlocks(input: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: {
-        objectChanges?: {
-          type: string;
-          objectType?: string;
-          objectId?: string;
-        }[];
-      }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
     core: {
       signAndExecuteTransaction: (input: {
         transaction: Transaction;
@@ -52,7 +34,17 @@ interface FunctionalContext {
         include?: unknown;
       }) => Promise<unknown>;
       waitForTransaction: (input: { result: unknown }) => Promise<unknown>;
+      listOwnedObjects(input: {
+        owner: string;
+        type?: string;
+        include?: { json?: boolean };
+      }): Promise<{
+        objects: { objectId: string; type: string; json?: unknown }[];
+      }>;
     };
+  };
+  chain: {
+    findCreatedObjects(sender: string): Promise<readonly CreatedObject[]>;
   };
   packageId: string;
   attacker: unknown;
@@ -68,41 +60,25 @@ const HONEST_UPPER = 1n << 65n;
 
 async function findPool(ctx: FunctionalContext): Promise<string> {
   const poolPrefix = `${ctx.packageId}::pool::Pool<`;
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: ctx.adminAddress },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data) {
-      for (const change of tx.objectChanges ?? []) {
-        if (
-          change.type === "created" &&
-          change.objectType?.startsWith(poolPrefix) &&
-          change.objectId
-        ) {
-          return change.objectId;
-        }
-      }
-    }
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
+  const pool = (await ctx.chain.findCreatedObjects(ctx.adminAddress)).find(
+    (object) => object.type.startsWith(poolPrefix),
+  );
+  if (pool) return pool.id;
   throw new Error("functional: could not locate the shared Pool");
 }
 
 async function findAttackerCoinA(ctx: FunctionalContext): Promise<string> {
-  const owned = await ctx.client.getOwnedObjects({
+  const { objects } = await ctx.client.core.listOwnedObjects({
     owner: ctx.attackerAddress,
-    filter: { StructType: `0x2::coin::Coin<${ctx.packageId}::coina::COINA>` },
-    options: { showType: true },
+    type: `0x2::coin::Coin<${ctx.packageId}::coina::COINA>`,
+    include: { json: true },
   });
-  const id = owned.data[0]?.data?.objectId;
+  const id = objects[0]?.objectId;
   if (!id) throw new Error("functional: attacker holds no COINA coin");
   return id;
 }
 
-export async function attack(ctx: FunctionalContext): Promise<void> {
+export async function functional(ctx: FunctionalContext): Promise<void> {
   const COINA = `${ctx.packageId}::coina::COINA`;
   const COINB = `${ctx.packageId}::coinb::COINB`;
   const poolId = await findPool(ctx);
@@ -147,5 +123,3 @@ export async function attack(ctx: FunctionalContext): Promise<void> {
   await ctx.client.core.waitForTransaction({ result: res });
 }
 
-/** Readable alias — the confirmer runner only ever calls `attack`. */
-export const functional = attack;

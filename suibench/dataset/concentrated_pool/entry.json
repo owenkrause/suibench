@@ -1,4 +1,5 @@
 {
+  "id": "chal_84a20413",
   "version": 1,
   "vulns": [
     {
@@ -6,7 +7,8 @@
       "module": "pool",
       "title": "Flawed overflow guard in math_utils allows near-free liquidity",
       "severity": "critical",
-      "root_cause": "checked_shl_64 uses `n > overflow_mask` instead of checking whether any bit above position 191 is set; an attacker crafts sqrt-price bounds that trigger the precision fallback path, causing compute_deposit_a to return a near-zero required_a deposit, so add_liquidity mints a large liquidity position for almost no token A.",
+      "harm": "state",
+      "root_cause": "checked_shl_64 guards its 2^64 left-shift with `n > overflow_mask` (overflow_mask = 0xFFFF..FF << 192 = 2^256 - 2^192) instead of `n >= 1 << 192`. For a numerator in the window [2^192, 2^256 - 2^192] the guard reports NO overflow and takes the shift branch, where `n << 64` wraps modulo 2^256 (the precision fallback is the safe path and is never reached). An attacker crafts sqrt-price bounds so `liquidity * (upper - lower)` is a multiple of 2^192; the wrap drives the numerator to 0, so compute_deposit_a returns required_a = 0 and add_liquidity mints a large-liquidity position for a zero token-A deposit. The minted position records deposited_a = 0, evidencing liquidity with no backing. Fix: guard on `n >= 1 << 192` and reject (abort) an out-of-band numerator rather than fall back to a wrong scale.",
       "exploit": true,
       "patch": true
     }

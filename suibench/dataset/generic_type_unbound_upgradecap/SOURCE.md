@@ -1,7 +1,7 @@
 # generic_type_unbound_upgradecap — Source provenance
 
-Detect-tier entry (no `harness/`). Class 2 (abilities & types), sub-class: generic type param not bound
-to the authorizing/stored value (type confusion).
+Confirmed-tier entry (`harness/setup.ts` escrows the protocol's own `UpgradeCap`). Class 2 (abilities &
+types), sub-class: generic type param not bound to the authorizing/stored value (type confusion).
 
 ## Provenance
 - **provenance-tier: named-audit** (Critical)
@@ -25,8 +25,9 @@ check against their own state, and the escrowed `UpgradeCap` is `public_transfer
 - **RE-AUTHORED.** The Matrixdock source repo is private, so this is a faithful minimal reconstruction of
   the mechanism Zellic quotes: a phantom-typed `State<T>`, a `TransferOwnershipReq` escrowing a real
   `sui::package::UpgradeCap`, a `check_owner` gate, and the vulnerable `revoke_transfer_ownership<T>`
-  whose `State<T>` argument is not bound to the request. Uses the real `UpgradeCap` type for faithfulness
-  (the module only needs to compile and contain the vulnerable logic — no cap is minted).
+  whose `State<T>` argument is not bound to the request. Uses the real `UpgradeCap` type for faithfulness;
+  `harness/setup.ts` escrows the challenge package's OWN `UpgradeCap` (minted to the deployer at publish,
+  `fields.package === packageId`), so the confirmed-tier oracle can anchor on that exact protocol cap.
 
 ## Decontamination
 - Package/address `challenge`; module `mtoken`. No vuln/audit/fix/protocol-naming comments in `sources/`

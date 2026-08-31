@@ -5,5 +5,5 @@ edition = "2024"
 [dependencies]
 
 [addresses]
-integer_mate = "0x0"
+math_lib = "0x0"
 challenge = "0x0"

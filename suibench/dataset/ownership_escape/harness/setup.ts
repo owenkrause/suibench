@@ -1,27 +1,18 @@
 // Setup for the `ownership_escape` entry — the SELLER (admin) lists an item for
 // sale, then the pre-snapshot is taken.
 //
-// As ADMIN we mint one `Item` (in its own tx so its object id is observable),
-// then `list_item` it, which wraps it in a SHARED `Listing` recording
-// `seller = admin`. After setup the world is:
-// a shared `Listing` holding an `Item` that belongs to the admin (they listed
-// it), and the attacker holds no such Item. The attacker never legitimately
-// owns this Item — the only ways to acquire it are `buy_item` (paying the seller
-// their price) or `cancel_listing` (which SHOULD be restricted to the seller).
-// That listed-by-admin / attacker-holds-nothing starting position is what makes
-// the check's "attacker took the seeded Item for free" predicate sound
-// (see ./check.ts).
+// As ADMIN we mint one `Item`, then `list_item` wraps it in a SHARED `Listing`
+// recording the exact `item_id` and `seller = admin`. The check uses that
+// pre-state Listing as its identity anchor: a successful exact-package
+// `Cancellation` emitted for the same item and seller witnesses the bug only
+// when its actor is the attacker and differs from the seller. Final balances
+// and final Item ownership are intentionally irrelevant.
 import { Transaction } from "@mysten/sui/transactions";
-import type { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
 import type { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 
 interface SetupContext {
-  client: SuiJsonRpcClient & {
-    getOwnedObjects(input: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
+  client: SuiGrpcClient & {
     core: {
       signAndExecuteTransaction: (input: {
         transaction: Transaction;
@@ -38,19 +29,15 @@ interface SetupContext {
   adminAddress: string;
 }
 
-// The item's list price, in MIST. The benign buyer pays exactly this to the
-// seller; the exploit pays nothing.
+// The item's list price, in MIST, used by the benign functional buyer. The
+// cancellation witness does not infer authorization from seller balance changes.
 const LIST_PRICE = 1_000_000_000n; // 1 SUI
 
 export async function setup(ctx: SetupContext): Promise<void> {
-  // TWO transactions on purpose. If we minted-and-listed in a single PTB the
-  // Item would be created-and-wrapped into the Listing atomically and its object
-  // id would never surface as a top-level `created` change — leaving nothing for
-  // check.ts to pin the theft to except the Item's field content, which a
-  // permissionless `mint_item(b"rare-sword", 100)` decoy could forge. Minting in
-  // its own tx makes the Item a top-level owned object of the admin, so its id
-  // appears in that tx's objectChanges and check.ts can pin the EXACT seeded
-  // object (see ./check.ts::findSeededItemId).
+  // TWO transactions on purpose: setup first discovers the minted Item's object
+  // id by type, then supplies that id to the listing transaction. Once listing
+  // commits, its pre-state `item_id` and `seller` fields are the authoritative
+  // identity that check.ts binds to the attack-phase `Cancellation` event.
 
   // tx1: mint the Item alone → it is returned to the admin as a top-level owned
   // object, so its object id is a `created` change on this admin-sent tx.
@@ -76,12 +63,12 @@ export async function setup(ctx: SetupContext): Promise<void> {
   // The admin now holds exactly one Item (the just-minted one); find its id by
   // its owned StructType — the same on-chain discovery every other harness uses,
   // rather than parsing the SDK's tx-result shape.
-  const owned = await ctx.client.getOwnedObjects({
+  const { objects } = await ctx.client.core.listOwnedObjects({
     owner: ctx.adminAddress,
-    filter: { StructType: `${ctx.packageId}::marketplace::Item` },
-    options: { showType: true },
+    type: `${ctx.packageId}::marketplace::Item`,
+    include: { json: true },
   });
-  const seededItemId = owned.data[0]?.data?.objectId;
+  const seededItemId = objects[0]?.objectId;
   if (!seededItemId)
     throw new Error("setup: could not determine minted Item id");
 

@@ -1,4 +1,5 @@
 {
+  "id": "chal_94c51cee",
   "version": 1,
   "vulns": [
     {
@@ -6,7 +7,18 @@
       "module": "lending_pool",
       "title": "defaulted debt is never written off the exchange rate, keeping cTokens overvalued so a redeem race lets early redeemers drain the pool",
       "severity": "high",
+      "harm": "state",
       "root_cause": "cTokens are priced by an exchange rate of `backing / total_ctokens`, where `backing = liquidity + total_debt` — outstanding loans are counted as a live pool asset because they are expected to be repaid. When a borrower becomes insolvent, `record_default` records the amount into a `defaulted` counter but NEVER subtracts it from `total_debt` (there is no write-off), so `backing` keeps including debt that will never be collected and the exchange rate stays inflated above the pool's real, redeemable value. The uncollectable shortfall is not socialized across all cToken holders; instead `redeem` pays each redeemer `ctokens * backing / total_ctokens` from actual `liquidity` at that inflated rate on a first-come basis. So a holder who redeems early (an attacker who monitors defaults and races to exit) receives full, un-discounted value and walks away whole, draining the real liquidity; the honest holders who redeem last find the cash exhausted and are left holding cTokens backed only by the bad debt — a bank run. The fix is to write off bad debt against `total_debt` (`total_debt -= defaulted`) when a default is recorded, so the exchange rate immediately reflects the loss and it is shared pro-rata by all holders.",
+      "exploit": true,
+      "patch": true
+    },
+    {
+      "id": "collateral-release-no-repay",
+      "module": "lending_pool",
+      "title": "borrower collateral is releasable without repaying the loan, so a borrow-then-reclaim leaves an unbacked debt and drains pool liquidity",
+      "severity": "critical",
+      "harm": "state",
+      "root_cause": "A borrower posts collateral via `borrow_collateralized` (which soundly requires the loan to be within the collateral's LTV) and receives a `DebtReceipt{debt, collateral}` recording the position. But `withdraw_collateral` returns the locked collateral to the caller WITHOUT checking that the outstanding `debt` has been repaid — it only zeroes the receipt's `collateral` field. So an attacker borrows fully-collateralized, then immediately calls `withdraw_collateral` to reclaim the entire deposit: they keep the borrowed ASSET AND recover their collateral, walking away with a `DebtReceipt{debt: borrowed, collateral: 0}` that nothing forces them to settle. Pool liquidity is short by the borrowed amount and the position is unbacked. The fix is to require the debt be fully repaid before releasing collateral: `assert!(receipt.debt == 0)` in `withdraw_collateral` (a legitimate borrower repays via `repay` first).",
       "exploit": true,
       "patch": true
     }

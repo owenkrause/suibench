@@ -22,6 +22,9 @@ liquidity deposit right before fees accrue captures a share of them.
 - **RE-AUTHORED.** A faithful minimal reconstruction: a pool holding a `protocol_fee` inside `reserve`, an
   `add_liquidity` that excludes it from the mint basis, and a `remove_liquidity` that fails to exclude it
   from the redeem basis. (Public `MoveExchange/MovEX-swap-v2` source could support a verbatim upgrade later.)
+- **Fidelity:** an admin-gated `collect_fees` (behind an `AdminCap` minted to the deployer at init) was added to
+  both `sources/` and the patch so accrued fees can be swept out of `reserve` rather than stranded forever; the
+  labeled `remove_liquidity` basis is unchanged (only it differs between sources and patch).
 
 ## Decontamination
 - Package/address `challenge`; module `amm_pool`. No vuln/audit/fix-naming comments in `sources/` (the bug is

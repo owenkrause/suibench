@@ -12,31 +12,16 @@
 // index only. They hold ZERO VAL and never deposit any VAL. This is exactly the
 // starting position a normal small depositor of the cheap asset would have.
 import { Transaction } from "@mysten/sui/transactions";
-import type { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
 import type { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 
+interface CreatedObject {
+  readonly id: string;
+  readonly type: string;
+}
+
 interface SetupContext {
-  client: SuiJsonRpcClient & {
-    getOwnedObjects(input: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
-    queryTransactionBlocks(input: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: {
-        objectChanges?: {
-          type: string;
-          objectType?: string;
-          objectId?: string;
-        }[];
-      }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
+  client: SuiGrpcClient & {
     core: {
       signAndExecuteTransaction: (input: {
         transaction: Transaction;
@@ -45,6 +30,9 @@ interface SetupContext {
       }) => Promise<{ $kind?: string }>;
       waitForTransaction: (input: { result: unknown }) => Promise<unknown>;
     };
+  };
+  chain: {
+    findCreatedObjects(sender: string): Promise<readonly CreatedObject[]>;
   };
   packageId: string;
   admin: Ed25519Keypair;
@@ -58,12 +46,12 @@ async function findCoin(
   owner: string,
   coinType: string,
 ): Promise<string> {
-  const owned = await ctx.client.getOwnedObjects({
+  const { objects } = await ctx.client.core.listOwnedObjects({
     owner,
-    filter: { StructType: `0x2::coin::Coin<${coinType}>` },
-    options: { showType: true },
+    type: `0x2::coin::Coin<${coinType}>`,
+    include: { json: true },
   });
-  const id = owned.data[0]?.data?.objectId;
+  const id = objects[0]?.objectId;
   if (!id) throw new Error(`setup: ${owner} holds no coin of type ${coinType}`);
   return id;
 }
@@ -73,23 +61,10 @@ async function findSharedByPrefix(
   fromAddress: string,
   typePrefix: string,
 ): Promise<string> {
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: fromAddress },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data)
-      for (const c of tx.objectChanges ?? [])
-        if (
-          c.type === "created" &&
-          c.objectType?.startsWith(typePrefix) &&
-          c.objectId
-        )
-          return c.objectId;
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
+  const object = (await ctx.chain.findCreatedObjects(fromAddress)).find(
+    (created) => created.type.startsWith(typePrefix),
+  );
+  if (object) return object.id;
   throw new Error(
     `setup: could not find a created object of type ${typePrefix}`,
   );

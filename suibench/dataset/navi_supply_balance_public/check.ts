@@ -23,13 +23,16 @@
 // patch makes `increase_supply_balance` internal (`public(friend)`), so the
 // attacker cannot inflate its balance, `withdraw` aborts on the missing/
 // insufficient supply record, and this gain is 0.
-import { balanceGained, type Check } from "core";
+import { balanceGained, type Check, type CheckResult } from "core";
+
+const LABEL_ID = "public-supply-balance" as const;
 
 /** Attacker must drain the bulk of the 1000-TOKEN reserve it never funded. */
 const RESERVE_DRAIN_THRESHOLD = 500n;
 
-export const check: Check = (delta, params) => {
+export const check: Check = (delta, params): CheckResult => {
   const TOKEN = `${params.packageId}::token::TOKEN`;
   const gained = balanceGained(delta, params.attackerAddress, TOKEN);
-  return gained >= RESERVE_DRAIN_THRESHOLD;
+  const witnessed = gained >= RESERVE_DRAIN_THRESHOLD;
+  return { witnesses: witnessed ? [LABEL_ID] : [] };
 };

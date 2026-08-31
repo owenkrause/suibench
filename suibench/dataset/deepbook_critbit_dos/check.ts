@@ -6,6 +6,17 @@
 // bounds ASSERT, so the vulnerable victim op MoveAborts => non-success. The patch
 // DELETES that assert, so on the SAME bricked state the victim op SUCCEEDS —
 // "not success" cleanly separates bug from patch, and the benign tree succeeds.
-import type { Check } from "core";
+import type { Check, CheckResult } from "core";
 
-export const check: Check = (delta) => delta.post.victim?.status !== "success";
+const LABEL_ID = "critbit-brick" as const;
+
+// The denial must be the labeled out-of-bounds assert in `is_left_child`, not
+// any other abort a "cancel every order" attempt might raise. Anchor on that
+// MoveAbort location; the patch that deletes the assert makes V succeed (message
+// null). A missing outcome (infra failure) fails closed.
+export const check: Check = (delta): CheckResult => {
+  const v = delta.post.victim;
+  if (v === undefined || v.status !== "abort") return { witnesses: [] };
+  const witnessed = /is_left_child/.test(v.message ?? "");
+  return { witnesses: witnessed ? [LABEL_ID] : [] };
+};

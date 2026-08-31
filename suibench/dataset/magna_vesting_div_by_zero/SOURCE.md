@@ -5,30 +5,33 @@ division-by-zero that permanently bricks a vesting allocation. The harm is the *
 transition (a valid withdrawal can never succeed), which a committed-state value predicate can't
 grade. It is graded instead by the availability/DoS victim-grading machinery
 (`2026-07-16-availability-dos-grading-design.md`): a designated victim op V (the beneficiary's
-withdraw) is run after the setup phase, and the entry confirms iff V does **not** complete
-successfully (`check.ts` = `ctx.victim?.status !== "success"`).
+withdraw) is run after the setup phase, and the entry confirms iff V fails with the labeled
+arithmetic fault (`check.ts` requires the exact fault location).
 
-## Grading design (why the standard `!== "success"` check)
+## Grading design (status plus exact arithmetic location)
 The minimal fix **guards the denominator**: `calc_vested_piece_amount` returns `0` when
 `period_length == 0` or `number_of_periods == 0` (a degenerate schedule — nothing vested yet)
 instead of dividing. Under that patch the SAME victim withdraw **succeeds** (returns a 0-coin), so a
-plain `status !== "success"` cleanly separates bug from patch (the critbit model, not bucket's
-`gas_exhausted`-specific check). On the vulnerable package V arithmetic-aborts (a division-by-zero
-`MoveAbort`, status `abort`) → non-success → confirmed; the benign `functional.mts` allocation and
-the patched package both let V succeed → not confirmed. `classifyVictimOutcome` was **not** modified:
-`abort` (bug) vs `success` (patch) already separates them, so no finer arithmetic-abort signature was
-needed. Gate B (patch → V success) is the anchor proving the denial is caused by the unguarded divisor.
+non-success status alone is insufficient: a future-start allocation can abort on subtraction
+underflow before either division. The checker therefore preserves the runtime error-kind guard and
+parses the victim message, witnessing only `vesting::calc_vested_piece_amount` at compiler bytecode
+instruction 8 or 20. Malformed messages, other functions, and other instructions return no witness.
+The benign `functional.ts` allocation and the patched package both let V succeed → not confirmed.
+`classifyVictimOutcome` was **not modified**: it still folds the transaction result into the victim
+status/message. Gate B (patch → V success) is the anchor proving the denial is caused by the
+unguarded divisor. The instruction discriminator is coupled to compiler-emitted bytecode and must
+be revalidated whenever the Move source or toolchain changes.
 
 ## No scaffolding needed
 Both entry points are already `public fun` — `create(funds, beneficiary, allocation, ctx)` commits the
 Vesting and `withdraw(vesting, clock, ctx): Coin<SUI>` is the victim op — so the harness drives them
-directly from PTBs (no friend-driver module, unlike bucket/critbit). `solution.mts`/`functional.mts`
-build the committed allocation bytes as raw `BCS(Piece)` in TS and pass them to `create`; `victim.ts`
+directly from PTBs (no friend-driver module, unlike bucket/critbit). `exploits/vesting-div-by-zero.ts`/`functional.ts`
+build the committed allocation bytes as raw `BCS(Piece)` in TS and pass them to `create`; `harness/victim.ts`
 calls `withdraw` as the beneficiary and transfers the returned coin. The vulnerable code is byte-verbatim.
 
 ## Validation (3 gates, real localnets, all PASS)
 gold-check: solution commits `period_length == 0` → victim withdraw denied (arithmetic abort) →
-confirmed. Gate A: `functional.mts` commits a well-formed schedule (start ~100s ago, 10×10s periods,
+confirmed. Gate A: `functional.ts` commits a well-formed schedule (start ~100s ago, 10×10s periods,
 1000 MIST) → victim withdraw succeeds taking 1000 MIST → not confirmed. Gate B: the guard-the-denominator
 patch → victim withdraw succeeds → not confirmed.
 

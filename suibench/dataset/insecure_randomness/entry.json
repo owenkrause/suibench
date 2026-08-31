@@ -1,4 +1,5 @@
 {
+  "id": "chal_c0c4f626",
   "version": 1,
   "vulns": [
     {
@@ -6,7 +7,8 @@
       "module": "game",
       "title": "Unfair randomness via abort-retry on losing draws",
       "severity": "high",
-      "root_cause": "play draws randomness and settles the payout in the same transaction, so a caller can wrap it in a PTB and abort whenever the draw loses, committing only winning outcomes and extracting the pool."
+      "harm": "state",
+      "root_cause": "play is a `public fun` that draws from `&Random` and returns the payout `Coin<SUI>` to its caller. Sui already blocks the naive PTB attack: a randomness-tainted result cannot be consumed by a later PTB command, so a caller cannot inspect the draw and conditionally abort across commands. The reachable weakness is composability — because `play` is `public`, an attacker publishes a wrapper module that calls `play` and aborts inside Move whenever the returned coin is zero (a loss). Losing draws then revert for gas only while wins commit, letting the attacker extract the pool. Fix: make the randomness-consuming function a private `entry fun` (non-`public`, so no other module can wrap it) and settle the payout internally — transfer the winnings to the player rather than returning a `Coin` the caller can branch on (an `entry` return would also require `drop`, which `Coin` lacks)."
     }
   ]
 }

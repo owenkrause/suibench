@@ -20,13 +20,16 @@
 // pool loss" reasoning as a closed-supply threshold over the known seed:
 // capturing the bulk of the 1000-FLASH pool (>= 500) is far above any noise
 // and is only reachable via the drain.
-import { type Check, balanceGained } from "core";
+import { type Check, type CheckResult, balanceGained } from "core";
+
+const LABEL_ID = "deposit-double-credit" as const;
 
 /** Attacker must capture the bulk of the 1000-FLASH pool it never lent into. */
 const POOL_DRAIN_THRESHOLD = 500n;
 
-export const check: Check = (delta, params) => {
+export const check: Check = (delta, params): CheckResult => {
   const FLASH = `${params.packageId}::flash::FLASH`;
   const gained = balanceGained(delta, params.attackerAddress, FLASH);
-  return gained >= POOL_DRAIN_THRESHOLD;
+  const witnessed = gained >= POOL_DRAIN_THRESHOLD;
+  return { witnesses: witnessed ? [LABEL_ID] : [] };
 };

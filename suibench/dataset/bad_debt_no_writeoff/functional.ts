@@ -1,36 +1,31 @@
-// Benign redemption: the attacker redeems only their FAIR socialized share
-// (300 cTokens -> 300 ASSET, which is what a written-down rate would honor for
-// the whole 500-cToken position). This is a legitimate partial exit that does
-// NOT overpay relative to the pool's true redeemable value, so it must NOT trip
-// the check. (Redeeming the full 500 at the overstated rate is the exploit; see
-// exploits/bad-debt-no-writeoff.ts.)
+// Two benign flows that must succeed (not abort) under every patched build
+// variant: a fully-repaid collateral loan, and a partial cToken redemption.
+// Exercises the same `record_default`/`redeem`/`borrow_collateralized`/
+// `withdraw_collateral` API the reference exploits use — including the
+// DefaultCap-gated `record_default` call in `harness/setup.ts` — so a patch
+// can't break the ABI while still defeating its labeled mechanism.
+//
+// The redemption's `actual_payout == fair_written_off_payout` ONLY under the
+// A patch (total_debt already written down to 0). Under base/B-patch this
+// same smaller redemption still overpays — sawA's inequality holds too, just
+// at 300-cToken scale instead of the full 500-cToken exploit. That's not a
+// false positive: this flow is graded on compile+non-abort only (see
+// scripts/verify-gold-patches.ts), its own events are never run through
+// check.ts — only the separate exploit script's are, via confirmExploit.
 //
 // Exports `attack(ctx)` (aliased `functional`) with the confirmer's
 // AttackContext shape — the runner only ever calls `attack`.
 import { Transaction } from "@mysten/sui/transactions";
 
+interface CreatedObject {
+  readonly id: string;
+  readonly type: string;
+  readonly digest: string;
+  readonly checkpoint: bigint;
+}
+
 interface Ctx {
   client: {
-    getOwnedObjects(i: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
-    queryTransactionBlocks(i: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: {
-        objectChanges?: {
-          type: string;
-          objectType?: string;
-          objectId?: string;
-        }[];
-      }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
     core: {
       signAndExecuteTransaction: (i: {
         transaction: Transaction;
@@ -38,7 +33,17 @@ interface Ctx {
         include?: unknown;
       }) => Promise<unknown>;
       waitForTransaction: (i: { result: unknown }) => Promise<unknown>;
+      listOwnedObjects(i: {
+        owner: string;
+        type?: string;
+        include?: { json?: boolean };
+      }): Promise<{
+        objects: { objectId: string; type: string; json?: unknown }[];
+      }>;
     };
+  };
+  chain: {
+    findCreatedObjects(sender: string): Promise<readonly CreatedObject[]>;
   };
   packageId: string;
   attacker: unknown;
@@ -48,42 +53,66 @@ interface Ctx {
 
 async function findPool(ctx: Ctx): Promise<string> {
   const prefix = `${ctx.packageId}::lending_pool::Pool`;
-  let cursor: string | null | undefined;
-  do {
-    const page = await ctx.client.queryTransactionBlocks({
-      filter: { FromAddress: ctx.adminAddress },
-      options: { showObjectChanges: true },
-      cursor,
-    });
-    for (const tx of page.data)
-      for (const c of tx.objectChanges ?? [])
-        if (c.type === "created" && c.objectType === prefix && c.objectId)
-          return c.objectId;
-    cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-  } while (cursor);
+  const pool = (await ctx.chain.findCreatedObjects(ctx.adminAddress)).find(
+    (object) => object.type === prefix,
+  );
+  if (pool) return pool.id;
   throw new Error("functional: Pool not found");
 }
 async function findReceipt(ctx: Ctx): Promise<string> {
-  const owned = await ctx.client.getOwnedObjects({
+  const { objects } = await ctx.client.core.listOwnedObjects({
     owner: ctx.attackerAddress,
-    filter: { StructType: `${ctx.packageId}::lending_pool::CTokenReceipt` },
-    options: { showType: true },
+    type: `${ctx.packageId}::lending_pool::CTokenReceipt`,
+    include: { json: true },
   });
-  const id = owned.data[0]?.data?.objectId;
+  const id = objects[0]?.objectId;
   if (!id) throw new Error("functional: attacker holds no CTokenReceipt");
   return id;
 }
+async function findAssetCoin(ctx: Ctx): Promise<string> {
+  const { objects } = await ctx.client.core.listOwnedObjects({
+    owner: ctx.attackerAddress,
+    type: `0x2::coin::Coin<${ctx.packageId}::asset::ASSET>`,
+    include: { json: true },
+  });
+  const id = objects[0]?.objectId;
+  if (!id) throw new Error("functional: attacker holds no ASSET");
+  return id;
+}
 
-export async function attack(ctx: Ctx): Promise<void> {
+// Two benign flows, both of which every gold patch must preserve (i.e. must
+// not abort — see the file header for why the redemption's fairness does NOT
+// hold under base/B-patch and why that's still not a grading false positive):
+//   1. a fully-repaid collateral loan (borrow -> repay -> withdraw_collateral):
+//      CollateralRelease reports `debt_remaining == 0` under every variant.
+//   2. a partial redemption (300 cTokens): Redemption is fair
+//      (`actual_payout == fair_written_off_payout`) only under the A patch.
+export async function functional(ctx: Ctx): Promise<void> {
   const pool = await findPool(ctx);
   const receipt = await findReceipt(ctx);
+  const coll = await findAssetCoin(ctx);
   const tx = new Transaction();
   tx.setSender(ctx.attackerAddress);
+
+  // Legit borrow: post 700, borrow 500, repay it in full, reclaim collateral.
+  const [borrowed, debt] = tx.moveCall({
+    target: `${ctx.packageId}::lending_pool::borrow_collateralized`,
+    arguments: [tx.object(pool), tx.object(coll), tx.pure.u64(500)],
+  });
+  tx.moveCall({
+    target: `${ctx.packageId}::lending_pool::repay`,
+    arguments: [tx.object(pool), debt, borrowed],
+  });
+  const back = tx.moveCall({
+    target: `${ctx.packageId}::lending_pool::withdraw_collateral`,
+    arguments: [tx.object(pool), debt],
+  });
+
   const [payout, leftover] = tx.moveCall({
     target: `${ctx.packageId}::lending_pool::redeem`,
     arguments: [tx.object(pool), tx.object(receipt), tx.pure.u64(300)],
   });
-  tx.transferObjects([payout, leftover], ctx.attackerAddress);
+  tx.transferObjects([back, payout, leftover, debt], ctx.attackerAddress);
   const res = await ctx.client.core.signAndExecuteTransaction({
     transaction: tx,
     signer: ctx.attacker,
@@ -92,5 +121,3 @@ export async function attack(ctx: Ctx): Promise<void> {
   await ctx.client.core.waitForTransaction({ result: res });
 }
 
-/** Readable alias — the confirmer runner only ever calls `attack`. */
-export const functional = attack;

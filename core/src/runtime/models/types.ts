@@ -38,7 +38,20 @@ export interface ToolDef {
   inputSchema: Record<string, unknown>;
 }
 
-export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "error";
+export type StopReason =
+  | "end_turn"
+  | "tool_use"
+  | "max_tokens"
+  | "error"
+  | "refusal";
+
+/** Why a safety classifier declined a request (`stop_reason: "refusal"`).
+ *  Category is the provider's open-set label (e.g. "cyber"); both fields may be
+ *  null when the provider gives none. */
+export interface RefusalInfo {
+  category: string | null;
+  explanation: string | null;
+}
 
 export interface Usage {
   inputTokens: number;
@@ -61,6 +74,8 @@ export interface ModelResponse {
   stopReason: StopReason;
   usage: Usage;
   raw?: unknown;
+  /** Present only when `stopReason === "refusal"`. */
+  refusal?: RefusalInfo;
 }
 
 export interface ModelClient {

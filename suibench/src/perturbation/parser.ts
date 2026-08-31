@@ -499,6 +499,22 @@ export async function renameSource(
     );
   };
 
+  // A field selection and a method call both use dot syntax, but their right
+  // branches differ in the Move AST: `vault.owner` is a name_expression while
+  // `vault.owner()` is a call_expression. Fields are deliberately frozen, so
+  // skip only identifiers on the right side of a field-selection dot.
+  const isFieldSelection = (ancestors: Node[]): boolean => {
+    for (let i = ancestors.length - 1; i >= 0; i--) {
+      const dot = ancestors[i];
+      if (dot.type !== "dot_expression") continue;
+      const branch = ancestors[i + 1];
+      const parts = namedChildren(dot);
+      const rhs = parts[parts.length - 1];
+      return branch === rhs && branch?.type === "name_expression";
+    }
+    return false;
+  };
+
   walkWithAncestors(root, (n, ancestors) => {
     if (n.children.length > 0 || handled.has(n.startIndex)) return;
 
@@ -520,6 +536,7 @@ export async function renameSource(
     }
 
     if (n.type !== "identifier") return; // field_identifier, variable_identifier, etc. frozen
+    if (isFieldSelection(ancestors)) return;
 
     const inUseMember = ancestors.some((a) => a.type === "use_member");
     if (inUseMember) {

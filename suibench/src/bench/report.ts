@@ -2,14 +2,9 @@
 // and manifest (provenance). Neither enters a score type — this is the driver's
 // assembly + persistence layer. One writer serves both the recall/precision
 // CorpusScore and the patch-rate PatchCorpusScore (both expose `entries[].target`).
-import {
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { CorpusScore, PatchCorpusScore, ScoreMetrics } from "core";
+import type { CorpusScore, ErroredEntry, PatchCorpusScore, ScoreMetrics } from "core";
 import type { CostTotals } from "core/runtime";
 import type { RunManifest } from "../adapters/manifest.js";
 
@@ -40,6 +35,14 @@ export interface PerturbationResult {
 }
 
 export interface PerturbationReport {
+  /** false iff a perturbation target could not be scored. */
+  complete: boolean;
+  /** Successful original+twin perturbation scores. */
+  scored: number;
+  /** Expected policy/infra failures excluded from the gap. */
+  errored: number;
+  /** Durable descriptions of targets that must be rerun. */
+  erroredEntries: ErroredEntry[];
   perEntry: PerturbationResult[];
   macro_gap: number | null;
 }
@@ -68,9 +71,8 @@ export interface RunDirConfig {
   effort: string;
   dataset: string;
   filter: string | null;
-  policy: "live" | "scripted" | "replay";
   requestedTargets: string[];
-  image: string;
+  images: { untrusted: string; confirmer: string; gate: string };
 }
 
 export class CostCollector {
@@ -104,9 +106,6 @@ export function writeRunReport(
   report: RunReport<CorpusScore | PatchCorpusScore>,
   config: RunDirConfig,
 ): void {
-  if (existsSync(dir) && readdirSync(dir).length > 0) {
-    throw new Error(`output directory is not empty: ${dir}`);
-  }
   mkdirSync(dir, { recursive: true });
   writeJson(join(dir, "manifest.json"), report.manifest);
   if (report.perturbation) {

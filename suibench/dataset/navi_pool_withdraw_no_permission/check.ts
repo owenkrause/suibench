@@ -18,13 +18,16 @@
 // walked off with the bulk of a pool it has no claim to" predicate. A correct
 // patch gates `withdraw` on `sender == operator`, so the attacker's call aborts
 // and this gain is 0.
-import { type Check, balanceGained } from "core";
+import { type Check, type CheckResult, balanceGained } from "core";
+
+const LABEL_ID = "withdraw-no-permission" as const;
 
 /** Attacker must drain the bulk of the 1000-TOKEN pool it never contributed to. */
 const POOL_DRAIN_THRESHOLD = 500n;
 
-export const check: Check = (delta, params) => {
+export const check: Check = (delta, params): CheckResult => {
   const TOKEN = `${params.packageId}::token::TOKEN`;
   const gained = balanceGained(delta, params.attackerAddress, TOKEN);
-  return gained >= POOL_DRAIN_THRESHOLD;
+  const witnessed = gained >= POOL_DRAIN_THRESHOLD;
+  return { witnesses: witnessed ? [LABEL_ID] : [] };
 };

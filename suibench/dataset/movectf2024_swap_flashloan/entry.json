@@ -1,4 +1,5 @@
 {
+  "id": "chal_3e3bd2d3",
   "version": 1,
   "vulns": [
     {
@@ -6,6 +7,7 @@
       "module": "vault",
       "title": "swap prices output on the spot reserve ratio with no constant-product invariant, drainable via a flash loan",
       "severity": "critical",
+      "harm": "state",
       "root_cause": "swap_a_to_b and swap_b_to_a compute the output as `amount_in * reserve_out / reserve_in` — the instantaneous reserve ratio — with no constant-product (x*y=k) invariant, no fee, and no minimum-output/slippage bound. Because the price is read from the live reserves at swap time, an attacker can first skew the reserves and then swap at the manipulated price to extract far more than a fair trade allows. The permissionless `flash` loan makes this free: in one transaction the attacker flash-borrows one side (e.g. 90 COINA, skewing reserves to 10 COINA / 100 COINB), swaps a small input at the distorted price to take the entire opposite reserve (10 COINA in yields 10*100/10 = 100 COINB, draining the pool), and repays the loan. The fix is to price swaps off the constant-product invariant (output = reserve_out - k/(reserve_in + amount_in)) so a skewed mid-price and a tiny input can no longer capture the pool.",
       "exploit": true,
       "patch": true

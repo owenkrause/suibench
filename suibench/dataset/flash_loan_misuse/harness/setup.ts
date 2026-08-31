@@ -12,7 +12,7 @@
 // ASSET total supply is fixed (cap frozen at init), so the attacker's only route
 // to a >= L ASSET gain is to keep the borrowed pool liquidity — exactly the bug.
 import { Transaction } from "@mysten/sui/transactions";
-import type { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
 import type { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 
 // Pool liquidity the attacker never contributed (the victim funds).
@@ -21,35 +21,18 @@ const SEED_LIQUIDITY = 1000n;
 const ATTACKER_FUNDS = 1000n;
 
 interface SetupContext {
-  client: SuiJsonRpcClient & {
-    queryTransactionBlocks(input: {
-      filter?: unknown;
-      options?: unknown;
-      cursor?: string | null;
-    }): Promise<{
-      data: {
-        objectChanges?: {
-          type: string;
-          objectType?: string;
-          objectId?: string;
-        }[];
-      }[];
-      hasNextPage: boolean;
-      nextCursor?: string | null;
-    }>;
-    getOwnedObjects(input: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
-    core: {
-      signAndExecuteTransaction: (input: {
-        transaction: Transaction;
-        signer: unknown;
-        include?: unknown;
-      }) => Promise<{ $kind?: string; FailedTransaction?: unknown }>;
-      waitForTransaction: (input: { result: unknown }) => Promise<unknown>;
-    };
+  client: SuiGrpcClient;
+  chain: {
+    findCreatedObjects(
+      sender: string,
+    ): Promise<
+      readonly {
+        id: string;
+        type: string;
+        digest: string;
+        checkpoint: bigint;
+      }[]
+    >;
   };
   packageId: string;
   attacker: Ed25519Keypair;
@@ -62,26 +45,10 @@ interface SetupContext {
 async function findPool(ctx: SetupContext): Promise<string> {
   const want = `${ctx.packageId}::lending_pool::LendingPool`;
   for (const owner of [ctx.adminAddress, ctx.attackerAddress]) {
-    let cursor: string | null | undefined;
-    do {
-      const page = await ctx.client.queryTransactionBlocks({
-        filter: { FromAddress: owner },
-        options: { showObjectChanges: true },
-        cursor,
-      });
-      for (const tx of page.data) {
-        for (const change of tx.objectChanges ?? []) {
-          if (
-            change.type === "created" &&
-            change.objectType === want &&
-            change.objectId
-          ) {
-            return change.objectId;
-          }
-        }
-      }
-      cursor = page.hasNextPage ? (page.nextCursor ?? null) : null;
-    } while (cursor);
+    const pool = (await ctx.chain.findCreatedObjects(owner)).find(
+      (object) => object.type === want,
+    );
+    if (pool) return pool.id;
   }
   throw new Error(
     `setup: could not locate shared LendingPool for package ${ctx.packageId}`,
@@ -91,12 +58,12 @@ async function findPool(ctx: SetupContext): Promise<string> {
 /** The admin received the whole fixed ASSET supply (minted+transferred at init). */
 async function findAdminAssetCoin(ctx: SetupContext): Promise<string> {
   const coinType = `0x2::coin::Coin<${ctx.packageId}::lending_pool::LENDING_POOL>`;
-  const owned = await ctx.client.getOwnedObjects({
+  const { objects } = await ctx.client.core.listOwnedObjects({
     owner: ctx.adminAddress,
-    filter: { StructType: coinType },
-    options: { showType: true },
+    type: coinType,
+    include: { json: true },
   });
-  const id = owned.data[0]?.data?.objectId;
+  const id = objects[0]?.objectId;
   if (!id)
     throw new Error("setup: admin does not hold the fixed-supply ASSET coin");
   return id;

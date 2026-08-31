@@ -21,7 +21,7 @@
 // now unredeemable because the balance is empty.
 import { Transaction } from "@mysten/sui/transactions";
 import { SUI_CLOCK_OBJECT_ID, normalizeStructTag } from "@mysten/sui/utils";
-import type { SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
+import type { SuiGrpcClient } from "@mysten/sui/grpc";
 import type { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 
 // Far-future close so the shill bid in solution.mts is still accepted
@@ -33,21 +33,7 @@ const VICTIM_BID = 1_000n; // V: the victim's live highest bid, in ASSET
 const SHILL_BID = 1_001n; // V+1: funded to the attacker for the outbidding shill
 
 interface SetupContext {
-  client: SuiJsonRpcClient & {
-    getOwnedObjects(input: {
-      owner: string;
-      filter?: unknown;
-      options?: unknown;
-    }): Promise<{ data: { data?: { objectId?: string } }[] }>;
-    core: {
-      signAndExecuteTransaction: (i: {
-        transaction: Transaction;
-        signer: unknown;
-        include?: unknown;
-      }) => Promise<TxResult>;
-      waitForTransaction: (i: { result: unknown }) => Promise<unknown>;
-    };
-  };
+  client: SuiGrpcClient;
   packageId: string;
   attacker: Ed25519Keypair;
   attackerAddress: string;
@@ -57,43 +43,15 @@ interface SetupContext {
   userAddress: string;
 }
 
-interface TxResult {
-  $kind?: string;
-  Transaction?: {
-    effects?: { changedObjects?: { objectId: string; idOperation?: string }[] };
-    objectTypes?: Record<string, string>;
-  };
-  FailedTransaction?: unknown;
-}
-
-function createdIds(res: TxResult, structType: string): string[] {
-  const tx = res.Transaction;
-  if (!tx) return [];
-  const types = tx.objectTypes ?? {};
-  const want = normalizeStructTag(structType);
-  const ids: string[] = [];
-  for (const change of tx.effects?.changedObjects ?? []) {
-    const got = types[change.objectId];
-    if (
-      change.idOperation === "Created" &&
-      got &&
-      normalizeStructTag(got) === want
-    )
-      ids.push(change.objectId);
-  }
-  return ids;
-}
-
 async function findAssetCoin(
   ctx: SetupContext,
   owner: string,
 ): Promise<string> {
-  const owned = await ctx.client.getOwnedObjects({
-    owner,
-    filter: { StructType: `0x2::coin::Coin<${ctx.packageId}::asset::ASSET>` },
-    options: { showType: true },
+  const owned = await ctx.client.core.listOwnedObjects({
+    owner: owner,
+    type: `0x2::coin::Coin<${ctx.packageId}::asset::ASSET>`,
   });
-  const id = owned.data[0]?.data?.objectId;
+  const id = owned.objects[0]?.objectId;
   if (!id) throw new Error(`setup: ${owner} holds no ASSET coin`);
   return id;
 }
@@ -135,7 +93,18 @@ export async function setup(ctx: SetupContext): Promise<void> {
     throw new Error("setup: create_auction tx failed");
   await ctx.client.core.waitForTransaction({ result: createRes });
 
-  const created = createdIds(createRes, `${ctx.packageId}::auction::Auction`);
+  const want = normalizeStructTag(`${ctx.packageId}::auction::Auction`);
+  const created = (createRes.Transaction.effects?.changedObjects ?? [])
+    .filter((change) => {
+      const objectType = createRes.Transaction.objectTypes?.[change.objectId];
+      return (
+        change.idOperation === "Created" &&
+        typeof objectType === "string" &&
+        objectType.includes("::") &&
+        normalizeStructTag(objectType) === want
+      );
+    })
+    .map((change) => change.objectId);
   if (created.length !== 1)
     throw new Error(`setup: expected 1 Auction, got ${created.length}`);
   const auctionId = created[0];

@@ -1,6 +1,5 @@
 // The bench driver — the thin assembly that turns the parts (dataset + adapters +
-// kernel combinators) into a runnable eval. It generalizes the controls prototype
-// (`controls/harness.ts::runAndGrade`) over the REAL Confirmer, real dataset
+// kernel combinators) into a runnable eval, over the REAL Confirmer, real dataset
 // entries, and the two independently-selectable axes.
 //
 // A run config is (harness ∈ {static, harnessed}) × (axis ∈ {comprehension,
@@ -17,7 +16,6 @@
 // dataset dir and NEVER flow into the Observation or any Mount — see
 // `buildObservation` and the `sanitize`-gated mount seam.
 import type {
-  Policy,
   Grader,
   Observation,
   ToolMenu,
@@ -31,8 +29,6 @@ import type {
   ExploitRun,
   MoveFile,
   JudgeFn,
-  Store,
-  Trajectory,
 } from "core";
 import {
   runCounterfactuals,
@@ -42,12 +38,17 @@ import {
   aggregateCorpus,
   passK,
 } from "core";
-import type { CostMeter, CostTotals } from "core/runtime";
-import { AgentError, CostMeter as CostMeterCtor } from "core/runtime";
+import type {
+  CostMeter,
+  CostTotals,
+  AgentConversation,
+  StopKind,
+  TrajectorySink,
+} from "core/runtime";
+import { AgentError, RefusalError, CostMeter as CostMeterCtor } from "core/runtime";
 import { readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { basename, join as pjoin } from "node:path";
 import { tmpdir } from "node:os";
-import { collectReports } from "../controls/harness.js";
 import { boundedMap } from "../util/bounded.js";
 import {
   counterfactualBoundary,
@@ -61,6 +62,7 @@ import {
   loadPatchFiles,
   type DatasetEntry,
 } from "../dataset/index.js";
+import type { AuditTrajectory } from "./trajectory.js";
 
 /** Where the policy sees the target from. */
 export type Harness = "static" | "harnessed";
@@ -80,16 +82,25 @@ export interface RunConfig {
   k?: number;
 }
 
-/** Everything the driver needs to grade one entry, minus the config. A `Policy`
- *  is produced per-entry (it wraps that entry's Observation/sandbox), so the
- *  caller injects a FACTORY, not a shared instance. */
+/** Everything the driver needs to grade one entry, minus the config. The agent
+ *  run is per-entry (it wraps that entry's Observation/sandbox), so the caller
+ *  injects a FACTORY, not a shared instance. */
 export interface BenchDeps {
-  /** Builds the policy for one entry's Observation. The AuditorPolicy wires its
-   *  own Sandbox over the SAME sanitized source; a scripted/replay policy ignores
-   *  it. Kept a factory so pass@k re-runs get a fresh policy each attempt. The
-   *  injected `meter` (when present) is the entry's cost accumulator — the
-   *  AuditorPolicy folds token usage into it; scripted/replay policies ignore it. */
-  policyFor: (entry: DatasetEntry, observation: Observation, meter?: CostMeter) => Policy;
+  /** Runs the agent over one entry's Observation and returns what it reported.
+   *  The auditor wires its own Sandbox over the SAME sanitized source. Called
+   *  once per attempt, so pass@k re-runs get a fresh run each time. The injected
+   *  `meter` (when present) is the entry's cost accumulator — the loop folds
+   *  token usage into it. */
+  runFor: (
+    observation: Observation,
+    meter?: CostMeter,
+  ) => Promise<{
+    exploits: Exploit[];
+    findings: Finding[];
+    conversation: AgentConversation;
+    stopReason: StopKind;
+    cost: CostTotals;
+  }>;
   /** Builds the exploitation-axis grader for ONE entry. A factory, not a shared
    *  instance, because the confirmer's setup/victim phases are per-entry data
    *  (`entry.harness`) — a shared grader would run every entry with an empty
@@ -98,8 +109,6 @@ export interface BenchDeps {
   graderFor?: (entry: DatasetEntry) => Grader;
   /** The comprehension-axis judge (findings↔labels). Required for that axis. */
   judge?: JudgeFn;
-  /** Optional trajectory sink so a run replays offline. */
-  store?: Store;
   /** Extra/override grading strategies, merged over the built-in `STRATEGIES`.
    *  A future `patch` axis registers here with no driver change. */
   strategies?: Record<string, GradingStrategy>;
@@ -107,6 +116,9 @@ export interface BenchDeps {
   concurrency?: number;
   /** Called once per attempted entry with its accumulated cost. */
   onEntryCost?: (target: string, cost: CostTotals) => void;
+  /** Persists one Trajectory per graded attempt. A save failure is logged and
+   *  swallowed — it must never fail the run it's recording. */
+  sink: TrajectorySink;
 }
 
 const DEFAULT_TOOLS: ToolMenu = { bash: true, writeFile: true, references: true };
@@ -115,18 +127,10 @@ const DEFAULT_TOOLS: ToolMenu = { bash: true, writeFile: true, references: true 
 // findings.json; Sandbox.writeFile has no shell/execution path.
 const STATIC_TOOLS: ToolMenu = { bash: false, writeFile: true, references: false };
 
-function assertPositiveInteger(value: number, name: string): void {
-  if (!Number.isSafeInteger(value) || value < 1) {
-    throw new RangeError(`${name} must be a positive integer; got ${value}`);
-  }
-}
-
 function assertValidRunConfig(config: RunConfig): void {
-  assertPositiveInteger(config.k ?? 1, "k");
-  if (config.axis === "exploitation" && config.harness === "static") {
-    throw new Error(
-      "static + exploitation is invalid: the static policy cannot produce executed exploits",
-    );
+  const k = config.k ?? 1;
+  if (!Number.isSafeInteger(k) || k < 1) {
+    throw new RangeError(`k must be a positive integer; got ${k}`);
   }
 }
 
@@ -182,8 +186,7 @@ export const STRATEGIES: Record<string, GradingStrategy> = {
 
 /**
  * Grade one entry on the EXPLOITATION axis: run each reported exploit through the
- * real Confirmer + counterfactual attribution + `scoreConfirmed`. This is the
- * prototype's `runAndGrade` loop with the real Confirmer and the real
+ * real Confirmer + counterfactual attribution + `scoreConfirmed`, via the
  * `counterfactualBoundary` adapter (which owns the variant-mount overlay), so the
  * driver never reimplements the N+1 counterfactual — it composes the kernel.
  */
@@ -201,6 +204,11 @@ async function gradeExploitation(
     .filter((v) => entry.patches[v.id])
     .map((v) => ({ id: v.id, patchFiles: loadPatchFiles(entry, v.id) }));
 
+  // The `runCheck` authoring guard's allowed-witness universe: EVERY manifest
+  // vulnerability id, not only the ids inferred from an outcome or the subset
+  // that happen to have patches (`labels`, above).
+  const allowedWitnessIds = entry.manifest.vulns.map((v) => v.id);
+
   const runs: ExploitRun[] = [];
   for (const exploit of exploits) {
     // Each exploit gets its OWN boundary so `baseProof` doesn't cross-contaminate.
@@ -211,17 +219,26 @@ async function gradeExploitation(
       vulnerableMount,
       readScript: readScriptFile,
       check,
+      allowedWitnessIds,
       label: entry.target,
     });
-    const run = await runCounterfactuals(
-      entry.dir,
-      exploit.finding.id,
-      // The Confirmer re-runs the model's OWN exploit script, not a dataset path.
-      writeExploitTmp(exploit.script),
-      labels,
-      boundary,
-    );
-    runs.push(run);
+    // Own the tmp dir for exactly this exploit's lifetime — `bench()` grades
+    // entries concurrently, so a shared cleanup list would risk deleting a
+    // sibling run's in-use dir.
+    const { dir, path } = writeExploitTmp(exploit.script);
+    try {
+      const run = await runCounterfactuals(
+        entry.dir,
+        exploit.finding.id,
+        // The Confirmer re-runs the model's OWN exploit script, not a dataset path.
+        path,
+        labels,
+        boundary,
+      );
+      runs.push(run);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 
   const attribution = attribute(runs);
@@ -229,28 +246,24 @@ async function gradeExploitation(
 }
 
 // The boundary's `readScript` reads a path; the model's exploit is already a
-// MoveFile (contents in hand), so stash it to a tmp file and hand back the path.
-const _tmpDirs: string[] = [];
-function writeExploitTmp(script: MoveFile): string {
+// MoveFile (contents in hand), so stash it to a tmp file and hand back both the
+// dir (for per-exploit cleanup) and the path.
+function writeExploitTmp(script: MoveFile): { dir: string; path: string } {
   const dir = mkdtempSync(pjoin(tmpdir(), "suibench-exploit-"));
-  _tmpDirs.push(dir);
-  const p = pjoin(dir, basename(script.path) || "exploit.mts");
-  writeFileSync(p, script.contents);
-  return p;
-}
-/** Remove exploit tmp files after a corpus run. */
-export function cleanupExploitTmp(): void {
-  for (const d of _tmpDirs.splice(0)) {
-    try {
-      rmSync(d, { recursive: true, force: true });
-    } catch {
-      /* best-effort */
-    }
+  try {
+    const path = pjoin(dir, basename(script.path) || "exploit.mts");
+    writeFileSync(path, script.contents);
+    return { dir, path };
+  } catch (err) {
+    // The write can throw before the caller's try/finally owns `dir` (e.g. a
+    // NUL byte in script.path, or ENOSPC) — clean up so it doesn't leak.
+    rmSync(dir, { recursive: true, force: true });
+    throw err;
   }
 }
 
 /**
- * Grade ONE run of ONE entry: collect the policy's reports, then dispatch to the
+ * Grade ONE run of ONE entry: run the agent, then dispatch its reports to the
  * axis's `GradingStrategy`. This is the leaf `Task` the `passK` combinator
  * re-runs. `deps.strategies` overrides/extends the built-in `STRATEGIES` (that's
  * where a future `patch` axis plugs in).
@@ -260,34 +273,36 @@ export async function runEntryOnce(
   config: RunConfig,
   deps: BenchDeps,
   meter?: CostMeter,
+  attemptIndex = 0,
 ): Promise<RunScore> {
   assertValidRunConfig(config);
   const observation = buildObservation(entry, config);
-  const policy = deps.policyFor(entry, observation, meter);
-  const { exploits, findings } = await collectReports(policy, observation);
-
-  if (deps.store) await recordTrajectory(deps.store, entry, observation, policy);
+  const { exploits, findings, conversation, stopReason, cost } =
+    await deps.runFor(observation, meter);
 
   const strategy = { ...STRATEGIES, ...deps.strategies }[config.axis];
   if (!strategy) throw new Error(`unknown grading axis "${config.axis}"`);
-  return strategy({ entry, exploits, findings, deps });
-}
+  const score = await strategy({ entry, exploits, findings, deps });
 
-// A minimal trajectory: the single Observation the policy graded + a terminal
-// marker. (The real per-turn trace lives inside the AuditorPolicy; the Store
-// records the driver-visible reports so a run replays offline.)
-async function recordTrajectory(
-  store: Store,
-  entry: DatasetEntry,
-  observation: Observation,
-  _policy: Policy,
-): Promise<void> {
-  const trajectory: Trajectory = {
-    id: `${entry.target}-${Date.now()}`,
-    target: entry.target,
-    steps: [{ observation, action: { kind: "run_bash", command: ":" } }],
-  };
-  await store.record(trajectory);
+  try {
+    const trajectory: AuditTrajectory = {
+      schemaVersion: 1,
+      id: `${entry.target}-${attemptIndex}`,
+      env: config.env,
+      conversation,
+      stopReason,
+      cost,
+      output: { exploits, findings },
+      score,
+    };
+    await deps.sink.save(trajectory);
+  } catch (err) {
+    console.error(
+      `[bench] ${entry.target}: trajectory save failed — ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  return score;
 }
 
 /** runs → entry, via the kernel `passK`. `k=1` is a single run (no passk field). */
@@ -297,11 +312,12 @@ export async function benchEntry(
   deps: BenchDeps,
   meter?: CostMeter,
 ): Promise<EntryScore> {
+  let attemptIndex = 0;
   return passK(
     config.k ?? 1,
     entry,
     entry.target,
-    (e) => runEntryOnce(e, config, deps, meter),
+    (e) => runEntryOnce(e, config, deps, meter, attemptIndex++),
   );
 }
 
@@ -333,48 +349,49 @@ export async function bench(
     }
     return true;
   });
-  try {
-    const outcomes = await boundedMap(
-      loaded,
-      deps.concurrency ?? 1,
-      async (entry): Promise<Outcome> => {
-        const meter = new CostMeterCtor();
+  const outcomes = await boundedMap(
+    loaded,
+    deps.concurrency ?? 1,
+    async (entry): Promise<Outcome> => {
+      const meter = new CostMeterCtor();
+      try {
         try {
-          try {
-            const score = await benchEntry(entry, config, deps, meter);
-            return { ok: true, score };
-          } catch (err) {
-            // Boundary/model infrastructure failures isolate to this entry. A
-            // different throw is a real defect and still aborts the run.
-            if (!(err instanceof InfraError) && !(err instanceof AgentError)) throw err;
-            console.error(
-              `[bench] ${entry.target}: ERRORED — excluded from aggregate, rerun to complete`,
-            );
-            return {
-              ok: false,
-              errored: {
-                target: entry.target,
-                error: `${err.name}: ${err.message}`,
-                attempts: err.attempts,
-              },
-            };
-          }
-        } finally {
-          deps.onEntryCost?.(entry.target, meter.totals());
+          const score = await benchEntry(entry, config, deps, meter);
+          return { ok: true, score };
+        } catch (err) {
+          // Boundary/model infrastructure failures isolate to this entry. A
+          // different throw is a real defect and still aborts the run.
+          if (
+            !(err instanceof InfraError) &&
+            !(err instanceof AgentError) &&
+            !(err instanceof RefusalError)
+          )
+            throw err;
+          console.error(
+            `[bench] ${entry.target}: ERRORED — excluded from aggregate, rerun to complete`,
+          );
+          return {
+            ok: false,
+            errored: {
+              target: entry.target,
+              error: `${err.name}: ${err.message}`,
+              attempts: err.attempts,
+            },
+          };
         }
-      },
-    );
+      } finally {
+        deps.onEntryCost?.(entry.target, meter.totals());
+      }
+    },
+  );
 
-    const entries = outcomes
-      .filter((o): o is { ok: true; score: EntryScore } => o.ok)
-      .map((o) => o.score);
-    const errored = outcomes
-      .filter((o): o is { ok: false; errored: ErroredEntry } => !o.ok)
-      .map((o) => o.errored);
-    return aggregateCorpus(entries, errored);
-  } finally {
-    cleanupExploitTmp();
-  }
+  const entries = outcomes
+    .filter((o): o is { ok: true; score: EntryScore } => o.ok)
+    .map((o) => o.score);
+  const errored = outcomes
+    .filter((o): o is { ok: false; errored: ErroredEntry } => !o.ok)
+    .map((o) => o.errored);
+  return aggregateCorpus(entries, errored);
 }
 
 /**

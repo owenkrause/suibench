@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import type { RunScore } from "core";
 import {
   evaluateGrade,
-  buildReferenceActions,
+  buildReferenceExploits,
   datasetEntryDirs,
   verifyDatasetEntryDir,
 } from "./verify-graders.js";
@@ -39,7 +39,8 @@ function run(over: Partial<RunScore["metrics"]>): RunScore {
       tier: "confirmed",
       labels_total: 1, labels_hit: 1,
       findings_total: 1, true_positives: 1, false_positives: 0,
-      recall: 1, precision: 1,
+      unattributed_findings: 0,
+      recall: 1, precision: 1, attribution_rate: 1,
       severity_accuracy: 1, severity_correct: 1, severity_total: 1,
       ...over,
     },
@@ -59,6 +60,15 @@ describe("evaluateGrade", () => {
     const r = evaluateGrade(run({ findings_total: 2, false_positives: 1, precision: 0.5 }));
     expect(r.pass).toBe(false);
     expect(r.reasons.join(" ")).toMatch(/false positive/i);
+  });
+  it("fails on an unattributed finding", () => {
+    const r = evaluateGrade(run({
+      findings_total: 2,
+      unattributed_findings: 1,
+      attribution_rate: 0.5,
+    }));
+    expect(r.pass).toBe(false);
+    expect(r.reasons.join(" ")).toMatch(/unattributed/i);
   });
   it("fails when there were no labels to hit", () => {
     expect(evaluateGrade(run({ labels_total: 0, labels_hit: 0, recall: null })).pass).toBe(false);
@@ -86,21 +96,17 @@ describe("evaluateGrade", () => {
   });
 });
 
-describe("buildReferenceActions", () => {
-  it("emits one report_exploit per exploit id, then a terminal sentinel", () => {
+describe("buildReferenceExploits", () => {
+  it("emits one exploit per exploit id, carrying the committed script", () => {
     const entry = {
       target: "vault",
-      manifest: { vulns: [{ id: "admincap-leak", module: "vault", title: "t", severity: "critical", root_cause: "rc" }] },
+      manifest: { vulns: [{ id: "admincap-leak", module: "vault", title: "t", severity: "critical", harm: "state", root_cause: "rc" }] },
       exploits: { "admincap-leak": makeTmpExploit() },
     } as unknown as DatasetEntry;
-    const actions = buildReferenceActions(entry);
-    expect(actions).toHaveLength(2);
-    expect(actions[0].kind).toBe("report_exploit");
-    if (actions[0].kind === "report_exploit") {
-      expect(actions[0].exploit.finding.id).toBe("admincap-leak");
-      expect(actions[0].exploit.script.contents).toContain("attack");
-    }
-    expect(actions[1].kind).toBe("run_bash");
+    const exploits = buildReferenceExploits(entry);
+    expect(exploits).toHaveLength(1);
+    expect(exploits[0].finding.id).toBe("admincap-leak");
+    expect(exploits[0].script.contents).toContain("attack");
   });
 });
 
@@ -147,12 +153,14 @@ function makeTmpExploit(): string {
 
 function validManifest(flags: { exploit: boolean; patch: boolean }): string {
   return JSON.stringify({
+    id: "chal_00000002",
     version: 1,
     vulns: [{
       id: "vuln-1",
       module: "candidate",
       title: "candidate",
       severity: "critical",
+      harm: "state",
       root_cause: "root cause",
       ...flags,
     }],
@@ -170,6 +178,6 @@ function makeEntry(manifest: string): { root: string; dir: string } {
 function verifyDeps() {
   return {
     manager: {} as SandboxManager,
-    env: { network: "devnet", model: "none", effort: "low" } as const,
+    env: { model: "none", effort: "low" } as const,
   };
 }

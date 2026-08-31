@@ -1,4 +1,5 @@
 {
+  "id": "chal_40441182",
   "version": 1,
   "vulns": [
     {
@@ -6,7 +7,8 @@
       "module": "game",
       "title": "signed pack message omits coin type enabling cross coin signature replay",
       "severity": "critical",
-      "root_cause": "sell_pack<COIN> authorizes a payout of `amount` from a `Game<COIN>` reserve by verifying a server ed25519 signature over a `PackMessage { pack_id, amount, nonce }`. The function is generic over the coin type `COIN`, but the signed payload does NOT include `COIN` (or the specific game/reserve id) — the message binds only pack_id, amount, and nonce. So a signature the server issues to authorize a sale of a CHEAP coin is byte-for-byte identical to what would authorize the same pack_id/amount/nonce for a VALUABLE coin: the attacker takes a legitimately-obtained signature for `sell_pack<CheapCoin>` and replays it against `sell_pack<ValuableCoin>` (same shared `Server` key across all coin games), passing the signature check and draining the most valuable reserve. The generic type parameter is unbound to the authorization. The fix is to include the coin type (e.g. `type_name::get<COIN>()`) — and ideally the game object id — in the signed message so a signature is valid only for the exact coin/reserve it was issued for.",
+      "harm": "state",
+      "root_cause": "sell_pack<COIN> authorizes a payout of `amount` from a `Game<COIN>` reserve by verifying a server ed25519 signature over a `PackMessage { pack_id, amount, owner }`. The function is generic over the coin type `COIN`, but the signed payload does NOT include `COIN` — it binds the pack, the amount, and the buyer, but not the currency. So a signature the server issues to authorize a CHEAP-coin sale is byte-for-byte identical to one authorizing the same pack_id/amount/owner for a VALUABLE coin: the buyer takes the signature legitimately issued to them for `sell_pack<CheapCoin>` and replays it against `sell_pack<ValuableCoin>` (same shared `Server` key across all coin games), passing the signature check and draining the most valuable reserve. The generic type parameter is unbound to the authorization. The fix is to include the coin type (e.g. `type_name::with_defining_ids<COIN>()`) in the signed message so a signature is valid only for the exact coin it was issued for.",
       "exploit": true,
       "patch": true
     }

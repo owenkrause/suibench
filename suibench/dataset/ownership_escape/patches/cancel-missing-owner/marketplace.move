@@ -1,6 +1,7 @@
 module challenge::marketplace {
     use sui::coin::{Self, Coin};
     use sui::balance::{Self, Balance};
+    use sui::event;
     use sui::sui::SUI;
 
     /// Caller of cancel_listing is not the seller who created the listing.
@@ -20,6 +21,13 @@ module challenge::marketplace {
         seller: address,
         price: u64,
         item: Item,
+    }
+
+    /// Neutral evidence that a listing was cancelled.
+    public struct Cancellation has copy, drop {
+        actor: address,
+        seller: address,
+        item_id: ID,
     }
 
     /// Shared marketplace state.
@@ -94,8 +102,9 @@ module challenge::marketplace {
         ctx: &mut TxContext,
     ): Item {
         assert!(listing.seller == ctx.sender(), E_NOT_SELLER);
-        let Listing { id, item_id: _, seller: _, price: _, item } = listing;
+        let Listing { id, item_id, seller, price: _, item } = listing;
         object::delete(id);
+        event::emit(Cancellation { actor: ctx.sender(), seller, item_id });
         item
     }
 }

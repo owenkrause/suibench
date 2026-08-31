@@ -1,12 +1,10 @@
 /// Minimal single-asset liquidity pool.
-///
-/// Routes liquidity accounting through `integer_mate::math_u256::checked_shlw`
-/// (see `sources/math_u256.move`).
 module challenge::pool {
     use sui::coin::{Self, Coin};
     use sui::balance::{Self, Balance};
+    use sui::event;
     use sui::sui::SUI;
-    use integer_mate::math_u256;
+    use math_lib::math_u256;
 
     // ── Errors ──────────────────────────────────────────────────
 
@@ -20,6 +18,15 @@ module challenge::pool {
         id: UID,
         reserve: Balance<SUI>,
         liquidity: u128,
+    }
+
+    /// Neutral operation evidence emitted only after liquidity is credited.
+    public struct LiquidityAdded has copy, drop {
+        actor: address,
+        amount: u256,
+        payment_received: u64,
+        required_payment: u64,
+        credited: u128,
     }
 
     // ── Pool lifecycle ──────────────────────────────────────────
@@ -40,18 +47,15 @@ module challenge::pool {
     // ── Liquidity operations ────────────────────────────────────
 
     /// Add liquidity to the pool. `amount` is a Q128.128-scaled liquidity
-    /// notional: `amount >> 128` is the liquidity credited to the pool, and
-    /// `amount` is fed through `checked_shlw` to derive the SUI payment
-    /// required for that liquidity. The pool trusts `checked_shlw` to flag a
-    /// shift that would exceed 256 bits; if it reports no overflow, the scaled
-    /// value is used directly to size the required deposit.
+    /// notional: `amount >> 128` is the liquidity credited to the pool, and the
+    /// required SUI payment is derived by rescaling the same notional.
     public fun add_liquidity(
         pool: &mut Pool,
         payment: Coin<SUI>,
         amount: u256,
-        _ctx: &mut TxContext,
+        ctx: &mut TxContext,
     ) {
-        let (scaled, overflowed) = math_u256::checked_shlw(amount);
+        let (scaled, overflowed) = math_u256::checked_shl_64(amount);
         assert!(!overflowed, E_SHIFT_OVERFLOW);
 
         // Descale `scaled` (`amount << 64`) back to a u64 token amount, keeping
@@ -59,13 +63,21 @@ module challenge::pool {
         // correctly-shifted `scaled >> 192` equals `amount >> 128`, so the SUI
         // deposit required tracks the liquidity credited one-for-one.
         let required_payment = ((scaled >> 192) as u64);
-        assert!(coin::value(&payment) >= required_payment, E_INSUFFICIENT_DEPOSIT);
+        let payment_received = coin::value(&payment);
+        assert!(payment_received >= required_payment, E_INSUFFICIENT_DEPOSIT);
 
         balance::join(&mut pool.reserve, coin::into_balance(payment));
 
         // Liquidity credited is `amount` descaled to integer units.
         let credited = ((amount >> 128) as u128);
         pool.liquidity = pool.liquidity + credited;
+        event::emit(LiquidityAdded {
+            actor: ctx.sender(),
+            amount,
+            payment_received,
+            required_payment,
+            credited,
+        });
     }
 
     /// Withdraw `amount` of SUI from the pool's reserves.

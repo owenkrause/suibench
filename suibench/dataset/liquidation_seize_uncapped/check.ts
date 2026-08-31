@@ -5,11 +5,14 @@
 // 2000 ASSET (supply is fixed, minted only to admin at init), so a gain of
 // >= 500 can only come from seizing collateral far exceeding the debt they
 // repaid.
-import { type Check, balanceGained } from "core";
+import { type Check, type CheckResult, balanceGained } from "core";
+
+const LABEL_ID = "seize-uncapped" as const;
 
 const THRESHOLD = 500n;
 
-export const check: Check = (delta, params) => {
+export const check: Check = (delta, params): CheckResult => {
   const ASSET = `${params.packageId}::asset::ASSET`;
-  return balanceGained(delta, params.attackerAddress, ASSET) >= THRESHOLD;
+  const witnessed = balanceGained(delta, params.attackerAddress, ASSET) >= THRESHOLD;
+  return { witnesses: witnessed ? [LABEL_ID] : [] };
 };
